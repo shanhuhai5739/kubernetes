@@ -26,12 +26,14 @@ import (
 
 	compute "google.golang.org/api/compute/v1"
 	"google.golang.org/api/googleapi"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2epv "k8s.io/kubernetes/test/e2e/framework/pv"
+	e2eservice "k8s.io/kubernetes/test/e2e/framework/service"
 	gcecloud "k8s.io/legacy-cloud-providers/gce"
 )
 
@@ -168,8 +170,8 @@ func (p *Provider) EnsureLoadBalancerResourcesDeleted(ip, portRange string) erro
 	}
 
 	return wait.Poll(10*time.Second, 5*time.Minute, func() (bool, error) {
-		service := p.gceCloud.ComputeServices().GA
-		list, err := service.ForwardingRules.List(project, region).Do()
+		computeservice := p.gceCloud.ComputeServices().GA
+		list, err := computeservice.ForwardingRules.List(project, region).Do()
 		if err != nil {
 			return false, err
 		}
@@ -247,14 +249,14 @@ func (p *Provider) CreatePVSource(zone, diskName string) (*v1.PersistentVolumeSo
 
 // DeletePVSource deletes a persistent volume source
 func (p *Provider) DeletePVSource(pvSource *v1.PersistentVolumeSource) error {
-	return framework.DeletePDWithRetry(pvSource.GCEPersistentDisk.PDName)
+	return e2epv.DeletePDWithRetry(pvSource.GCEPersistentDisk.PDName)
 }
 
 // CleanupServiceResources cleans up GCE Service Type=LoadBalancer resources with
 // the given name. The name is usually the UUID of the Service prefixed with an
 // alpha-numeric character ('a') to work around cloudprovider rules.
 func (p *Provider) CleanupServiceResources(c clientset.Interface, loadBalancerName, region, zone string) {
-	if pollErr := wait.Poll(5*time.Second, framework.LoadBalancerCleanupTimeout, func() (bool, error) {
+	if pollErr := wait.Poll(5*time.Second, e2eservice.LoadBalancerCleanupTimeout, func() (bool, error) {
 		if err := p.cleanupGCEResources(c, loadBalancerName, region, zone); err != nil {
 			framework.Logf("Still waiting for glbc to cleanup: %v", err)
 			return false, nil
@@ -308,10 +310,10 @@ func (p *Provider) cleanupGCEResources(c clientset.Interface, loadBalancerName, 
 	return
 }
 
-// LoadBalancerSrcRanges contains the ranges of ips used by the GCE load balancers (l4 & L7)
-// for proxying client requests and performing health checks.
-func (p *Provider) LoadBalancerSrcRanges() []string {
-	return gcecloud.LoadBalancerSrcRanges()
+// L4LoadBalancerSrcRanges contains the ranges of ips used by the GCE L4 load
+// balancers for proxying client requests and performing health checks.
+func (p *Provider) L4LoadBalancerSrcRanges() []string {
+	return gcecloud.L4LoadBalancerSrcRanges()
 }
 
 // EnableAndDisableInternalLB returns functions for both enabling and disabling internal Load Balancer
@@ -349,16 +351,6 @@ func SetInstanceTags(cloudConfig framework.CloudConfig, instanceName, zone strin
 	}
 	framework.Logf("Sent request to set tags %v on instance: %v", tags, instanceName)
 	return resTags.Items
-}
-
-// GetNodeTags gets k8s node tag from one of the nodes
-func GetNodeTags(c clientset.Interface, cloudConfig framework.CloudConfig) []string {
-	nodes := framework.GetReadySchedulableNodesOrDie(c)
-	if len(nodes.Items) == 0 {
-		framework.Logf("GetNodeTags: Found 0 node.")
-		return []string{}
-	}
-	return GetInstanceTags(cloudConfig, nodes.Items[0].Name).Items
 }
 
 // IsGoogleAPIHTTPErrorCode returns true if the error is a google api

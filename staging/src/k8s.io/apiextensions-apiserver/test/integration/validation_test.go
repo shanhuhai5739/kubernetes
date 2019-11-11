@@ -22,17 +22,14 @@ import (
 	"testing"
 	"time"
 
-	clientschema "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/scheme"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/apimachinery/pkg/util/yaml"
-	utilfeature "k8s.io/apiserver/pkg/util/feature"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 
 	apiextensionsv1beta1 "k8s.io/apiextensions-apiserver/pkg/apis/apiextensions/v1beta1"
-	apiextensionsfeatures "k8s.io/apiextensions-apiserver/pkg/features"
+	clientschema "k8s.io/apiextensions-apiserver/pkg/client/clientset/clientset/scheme"
 	"k8s.io/apiextensions-apiserver/test/integration/fixtures"
 )
 
@@ -224,7 +221,6 @@ func newNoxuValidationInstance(namespace, name string) *unstructured.Unstructure
 }
 
 func TestCustomResourceValidation(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceWebhookConversion, true)()
 	tearDown, apiExtensionClient, dynamicClient, err := fixtures.StartDefaultServerWithClients(t)
 	if err != nil {
 		t.Fatal(err)
@@ -256,7 +252,6 @@ func TestCustomResourceValidation(t *testing.T) {
 }
 
 func TestCustomResourceUpdateValidation(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceWebhookConversion, true)()
 	tearDown, apiExtensionClient, dynamicClient, err := fixtures.StartDefaultServerWithClients(t)
 	if err != nil {
 		t.Fatal(err)
@@ -310,7 +305,6 @@ func TestCustomResourceUpdateValidation(t *testing.T) {
 }
 
 func TestCustomResourceValidationErrors(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceWebhookConversion, true)()
 	tearDown, apiExtensionClient, dynamicClient, err := fixtures.StartDefaultServerWithClients(t)
 	if err != nil {
 		t.Fatal(err)
@@ -327,9 +321,9 @@ func TestCustomResourceValidationErrors(t *testing.T) {
 		ns := "not-the-default"
 
 		tests := []struct {
-			name          string
-			instanceFn    func() *unstructured.Unstructured
-			expectedError string
+			name           string
+			instanceFn     func() *unstructured.Unstructured
+			expectedErrors []string
 		}{
 			{
 				name: "bad alpha",
@@ -338,7 +332,7 @@ func TestCustomResourceValidationErrors(t *testing.T) {
 					instance.Object["alpha"] = "foo_123!"
 					return instance
 				},
-				expectedError: "alpha in body should match '^[a-zA-Z0-9_]*$'",
+				expectedErrors: []string{"alpha in body should match '^[a-zA-Z0-9_]*$'"},
 			},
 			{
 				name: "bad beta",
@@ -347,7 +341,7 @@ func TestCustomResourceValidationErrors(t *testing.T) {
 					instance.Object["beta"] = 5
 					return instance
 				},
-				expectedError: "beta in body should be greater than or equal to 10",
+				expectedErrors: []string{"beta in body should be greater than or equal to 10"},
 			},
 			{
 				name: "bad gamma",
@@ -356,7 +350,7 @@ func TestCustomResourceValidationErrors(t *testing.T) {
 					instance.Object["gamma"] = "qux"
 					return instance
 				},
-				expectedError: "gamma in body should be one of [foo bar baz]",
+				expectedErrors: []string{`gamma: Unsupported value: "qux": supported values: "foo", "bar", "baz"`},
 			},
 			{
 				name: "bad delta",
@@ -365,7 +359,10 @@ func TestCustomResourceValidationErrors(t *testing.T) {
 					instance.Object["delta"] = "foobarbaz"
 					return instance
 				},
-				expectedError: "must validate at least one schema (anyOf)\ndelta in body should be at most 5 chars long",
+				expectedErrors: []string{
+					"must validate at least one schema (anyOf)",
+					"delta in body should be at most 5 chars long",
+				},
 			},
 			{
 				name: "absent alpha and beta",
@@ -383,7 +380,7 @@ func TestCustomResourceValidationErrors(t *testing.T) {
 					}
 					return instance
 				},
-				expectedError: ".alpha in body is required\n.beta in body is required",
+				expectedErrors: []string{"alpha: Required value", "beta: Required value"},
 			},
 		}
 
@@ -394,13 +391,14 @@ func TestCustomResourceValidationErrors(t *testing.T) {
 				instanceToCreate.Object["apiVersion"] = fmt.Sprintf("%s/%s", noxuDefinition.Spec.Group, v.Name)
 				_, err := noxuResourceClient.Create(instanceToCreate, metav1.CreateOptions{})
 				if err == nil {
-					t.Errorf("%v: expected %v", tc.name, tc.expectedError)
+					t.Errorf("%v: expected %v", tc.name, tc.expectedErrors)
 					continue
 				}
 				// this only works when status errors contain the expect kind and version, so this effectively tests serializations too
-				if !strings.Contains(err.Error(), tc.expectedError) {
-					t.Errorf("%v: expected %v, got %v", tc.name, tc.expectedError, err)
-					continue
+				for _, expectedError := range tc.expectedErrors {
+					if !strings.Contains(err.Error(), expectedError) {
+						t.Errorf("%v: expected %v, got %v", tc.name, expectedError, err)
+					}
 				}
 			}
 		}
@@ -411,7 +409,6 @@ func TestCustomResourceValidationErrors(t *testing.T) {
 }
 
 func TestCRValidationOnCRDUpdate(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceWebhookConversion, true)()
 	tearDown, apiExtensionClient, dynamicClient, err := fixtures.StartDefaultServerWithClients(t)
 	if err != nil {
 		t.Fatal(err)
@@ -483,7 +480,6 @@ func TestCRValidationOnCRDUpdate(t *testing.T) {
 }
 
 func TestForbiddenFieldsInSchema(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceWebhookConversion, true)()
 	tearDown, apiExtensionClient, dynamicClient, err := fixtures.StartDefaultServerWithClients(t)
 	if err != nil {
 		t.Fatal(err)
@@ -542,8 +538,6 @@ func TestForbiddenFieldsInSchema(t *testing.T) {
 }
 
 func TestNonStructuralSchemaConditionUpdate(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceWebhookConversion, true)()
-
 	tearDown, apiExtensionClient, _, err := fixtures.StartDefaultServerWithClients(t)
 	if err != nil {
 		t.Fatal(err)
@@ -554,9 +548,9 @@ func TestNonStructuralSchemaConditionUpdate(t *testing.T) {
 apiVersion: apiextensions.k8s.io/v1beta1
 kind: CustomResourceDefinition
 metadata:
-  name: foos.tests.apiextensions.k8s.io
+  name: foos.tests.example.com
 spec:
-  group: tests.apiextensions.k8s.io
+  group: tests.example.com
   version: v1beta1
   names:
     plural: foos
@@ -588,8 +582,7 @@ spec:
 
 	// create CRDs
 	t.Logf("Creating CRD %s", crd.Name)
-	crd, err = apiExtensionClient.ApiextensionsV1beta1().CustomResourceDefinitions().Create(crd)
-	if err != nil {
+	if _, err = apiExtensionClient.ApiextensionsV1beta1().CustomResourceDefinitions().Create(crd); err != nil {
 		t.Fatalf("unexpected create error: %v", err)
 	}
 
@@ -619,8 +612,7 @@ spec:
 			t.Fatalf("unexpected get error: %v", err)
 		}
 		crd.Spec.Validation = nil
-		crd, err = apiExtensionClient.ApiextensionsV1beta1().CustomResourceDefinitions().Update(crd)
-		if apierrors.IsConflict(err) {
+		if _, err = apiExtensionClient.ApiextensionsV1beta1().CustomResourceDefinitions().Update(crd); apierrors.IsConflict(err) {
 			continue
 		}
 		if err != nil {
@@ -653,8 +645,7 @@ spec:
 			t.Fatalf("unexpected get error: %v", err)
 		}
 		crd.Spec.Validation = &apiextensionsv1beta1.CustomResourceValidation{OpenAPIV3Schema: origSchema}
-		crd, err = apiExtensionClient.ApiextensionsV1beta1().CustomResourceDefinitions().Update(crd)
-		if apierrors.IsConflict(err) {
+		if _, err = apiExtensionClient.ApiextensionsV1beta1().CustomResourceDefinitions().Update(crd); apierrors.IsConflict(err) {
 			continue
 		}
 		if err != nil {
@@ -684,8 +675,6 @@ spec:
 }
 
 func TestNonStructuralSchemaCondition(t *testing.T) {
-	defer featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, apiextensionsfeatures.CustomResourceWebhookConversion, true)()
-
 	tearDown, apiExtensionClient, _, err := fixtures.StartDefaultServerWithClients(t)
 	if err != nil {
 		t.Fatal(err)
@@ -717,19 +706,20 @@ spec:
 	type Test struct {
 		desc                                  string
 		globalSchema, v1Schema, v1beta1Schema string
-		expectedCreateError                   bool
+		expectedCreateErrors                  []string
+		unexpectedCreateErrors                []string
 		expectedViolations                    []string
 		unexpectedViolations                  []string
 	}
 	tests := []Test{
-		{"empty", "", "", "", false, nil, nil},
+		{"empty", "", "", "", nil, nil, nil, nil},
 		{
 			desc: "int-or-string and preserve-unknown-fields true",
 			globalSchema: `
 x-kubernetes-preserve-unknown-fields: true
 x-kubernetes-int-or-string: true
 `,
-			expectedViolations: []string{
+			expectedCreateErrors: []string{
 				"spec.validation.openAPIV3Schema.x-kubernetes-preserve-unknown-fields: Invalid value: true: must be false if x-kubernetes-int-or-string is true",
 			},
 		},
@@ -740,7 +730,7 @@ type: object
 x-kubernetes-embedded-resource: true
 x-kubernetes-int-or-string: true
 `,
-			expectedViolations: []string{
+			expectedCreateErrors: []string{
 				"spec.validation.openAPIV3Schema.x-kubernetes-embedded-resource: Invalid value: true: must be false if x-kubernetes-int-or-string is true",
 			},
 		},
@@ -750,7 +740,7 @@ x-kubernetes-int-or-string: true
 type: object
 x-kubernetes-embedded-resource: true
 `,
-			expectedViolations: []string{
+			expectedCreateErrors: []string{
 				"spec.validation.openAPIV3Schema.properties: Required value: must not be empty if x-kubernetes-embedded-resource is true without x-kubernetes-preserve-unknown-fields",
 			},
 		},
@@ -785,7 +775,7 @@ type: array
 x-kubernetes-embedded-resource: true
 x-kubernetes-preserve-unknown-fields: true
 `,
-			expectedViolations: []string{
+			expectedCreateErrors: []string{
 				"spec.validation.openAPIV3Schema.type: Invalid value: \"array\": must be object if x-kubernetes-embedded-resource is true",
 			},
 		},
@@ -796,7 +786,7 @@ type: ""
 x-kubernetes-embedded-resource: true
 x-kubernetes-preserve-unknown-fields: true
 `,
-			expectedViolations: []string{
+			expectedCreateErrors: []string{
 				"spec.validation.openAPIV3Schema.type: Required value: must be object if x-kubernetes-embedded-resource is true",
 			},
 		},
@@ -883,6 +873,19 @@ oneOf:
 			},
 		},
 		{
+			desc: "invalid regex pattern",
+			globalSchema: `
+type: object
+properties:
+  foo:
+    type: string
+    pattern: "+"
+`,
+			expectedViolations: []string{
+				"spec.validation.openAPIV3Schema.properties[foo].pattern: Invalid value: \"+\": must be a valid regular expression, but isn't: error parsing regexp: missing argument to repetition operator: `+`",
+			},
+		},
+		{
 			desc: "forbidden vendor extensions in nested value validation",
 			globalSchema: `
 type: object
@@ -922,7 +925,7 @@ oneOf:
       x-kubernetes-embedded-resource: true
       x-kubernetes-preserve-unknown-fields: true
 `,
-			expectedViolations: []string{
+			expectedCreateErrors: []string{
 				"spec.validation.openAPIV3Schema.allOf[0].properties[embedded-resource].x-kubernetes-preserve-unknown-fields: Forbidden: must be false to be structural",
 				"spec.validation.openAPIV3Schema.allOf[0].properties[embedded-resource].x-kubernetes-embedded-resource: Forbidden: must be false to be structural",
 				"spec.validation.openAPIV3Schema.allOf[0].properties[int-or-string].x-kubernetes-int-or-string: Forbidden: must be false to be structural",
@@ -938,7 +941,7 @@ oneOf:
 			},
 		},
 		{
-			desc: "missing types",
+			desc: "missing types with extensions",
 			globalSchema: `
 properties:
   foo:
@@ -966,11 +969,48 @@ properties:
     properties:
       a: {}
 `,
-			expectedViolations: []string{
+			expectedCreateErrors: []string{
 				"spec.validation.openAPIV3Schema.properties[foo].properties[a].type: Required value: must not be empty for specified object fields",
 				"spec.validation.openAPIV3Schema.properties[foo].type: Required value: must not be empty for specified object fields",
 				"spec.validation.openAPIV3Schema.properties[int-or-string].properties[a].type: Required value: must not be empty for specified object fields",
 				"spec.validation.openAPIV3Schema.properties[json].properties[a].type: Required value: must not be empty for specified object fields",
+				"spec.validation.openAPIV3Schema.properties[abc].additionalProperties.properties[a].items.additionalProperties.type: Required value: must not be empty for specified object fields",
+				"spec.validation.openAPIV3Schema.properties[abc].additionalProperties.properties[a].items.type: Required value: must not be empty for specified array items",
+				"spec.validation.openAPIV3Schema.properties[abc].additionalProperties.properties[a].type: Required value: must not be empty for specified object fields",
+				"spec.validation.openAPIV3Schema.properties[abc].additionalProperties.type: Required value: must not be empty for specified object fields",
+				"spec.validation.openAPIV3Schema.properties[abc].type: Required value: must not be empty for specified object fields",
+				"spec.validation.openAPIV3Schema.properties[bar].items.additionalProperties.items.type: Required value: must not be empty for specified array items",
+				"spec.validation.openAPIV3Schema.properties[bar].items.additionalProperties.properties[a].type: Required value: must not be empty for specified object fields",
+				"spec.validation.openAPIV3Schema.properties[bar].items.additionalProperties.type: Required value: must not be empty for specified object fields",
+				"spec.validation.openAPIV3Schema.properties[bar].items.type: Required value: must not be empty for specified array items",
+				"spec.validation.openAPIV3Schema.properties[bar].type: Required value: must not be empty for specified object fields",
+				"spec.validation.openAPIV3Schema.type: Required value: must not be empty at the root",
+			},
+		},
+		{
+			desc: "missing types without extensions",
+			globalSchema: `
+properties:
+  foo:
+    properties:
+      a: {}
+  bar:
+    items:
+      additionalProperties:
+        properties:
+          a: {}
+        items: {}
+  abc:
+    additionalProperties:
+      properties:
+        a:
+          items:
+            additionalProperties:
+              items:
+`,
+			expectedViolations: []string{
+				"spec.validation.openAPIV3Schema.properties[foo].properties[a].type: Required value: must not be empty for specified object fields",
+				"spec.validation.openAPIV3Schema.properties[foo].type: Required value: must not be empty for specified object fields",
 				"spec.validation.openAPIV3Schema.properties[abc].additionalProperties.properties[a].items.additionalProperties.type: Required value: must not be empty for specified object fields",
 				"spec.validation.openAPIV3Schema.properties[abc].additionalProperties.properties[a].items.type: Required value: must not be empty for specified array items",
 				"spec.validation.openAPIV3Schema.properties[abc].additionalProperties.properties[a].type: Required value: must not be empty for specified object fields",
@@ -1032,7 +1072,7 @@ properties:
     - type: string
     - type: integer
 `,
-			expectedViolations: []string{
+			expectedCreateErrors: []string{
 				"spec.validation.openAPIV3Schema.properties[d].anyOf[0].type: Forbidden: must be empty to be structural",
 				"spec.validation.openAPIV3Schema.properties[d].anyOf[1].type: Forbidden: must be empty to be structural",
 				"spec.validation.openAPIV3Schema.properties[e].allOf[0].anyOf[0].type: Forbidden: must be empty to be structural",
@@ -1042,7 +1082,7 @@ properties:
 				"spec.validation.openAPIV3Schema.properties[g].anyOf[0].type: Forbidden: must be empty to be structural",
 				"spec.validation.openAPIV3Schema.properties[g].anyOf[1].type: Forbidden: must be empty to be structural",
 			},
-			unexpectedViolations: []string{
+			unexpectedCreateErrors: []string{
 				"spec.validation.openAPIV3Schema.properties[a]",
 				"spec.validation.openAPIV3Schema.properties[b]",
 				"spec.validation.openAPIV3Schema.properties[c]",
@@ -1193,8 +1233,8 @@ properties:
     type: string
 `,
 			expectedViolations: []string{
-				"spec.version[v1beta1].schema.openAPIV3Schema.properties[a].type: Required value: must not be empty for specified object fields",
-				"spec.version[v1beta1].schema.openAPIV3Schema.properties[b]: Required value: because it is defined in spec.version[v1beta1].schema.openAPIV3Schema.not.properties[b]",
+				"spec.versions[0].schema.openAPIV3Schema.properties[a].type: Required value: must not be empty for specified object fields",
+				"spec.versions[0].schema.openAPIV3Schema.properties[b]: Required value: because it is defined in spec.versions[0].schema.openAPIV3Schema.not.properties[b]",
 			},
 		},
 		{
@@ -1216,10 +1256,10 @@ not:
     d: {}
 `,
 			expectedViolations: []string{
-				"spec.version[v1beta1].schema.openAPIV3Schema.properties[a].type: Required value: must not be empty for specified object fields",
-				"spec.version[v1beta1].schema.openAPIV3Schema.properties[b]: Required value: because it is defined in spec.version[v1beta1].schema.openAPIV3Schema.not.properties[b]",
-				"spec.version[v1].schema.openAPIV3Schema.properties[c].type: Required value: must not be empty for specified object fields",
-				"spec.version[v1].schema.openAPIV3Schema.properties[d]: Required value: because it is defined in spec.version[v1].schema.openAPIV3Schema.not.properties[d]",
+				"spec.versions[0].schema.openAPIV3Schema.properties[a].type: Required value: must not be empty for specified object fields",
+				"spec.versions[0].schema.openAPIV3Schema.properties[b]: Required value: because it is defined in spec.versions[0].schema.openAPIV3Schema.not.properties[b]",
+				"spec.versions[1].schema.openAPIV3Schema.properties[c].type: Required value: must not be empty for specified object fields",
+				"spec.versions[1].schema.openAPIV3Schema.properties[d]: Required value: because it is defined in spec.versions[1].schema.openAPIV3Schema.not.properties[d]",
 			},
 		},
 		{
@@ -1330,6 +1370,46 @@ not:
 				"spec.validation.openAPIV3Schema.not.properties[metadata]: Forbidden: must not be specified in a nested context",
 			},
 		},
+		{
+			desc: "missing items for array",
+			globalSchema: `
+type: object
+properties:
+  slice:
+    type: array
+`,
+			expectedViolations: []string{
+				"spec.validation.openAPIV3Schema.properties[slice].items: Required value: must be specified",
+			},
+		},
+		{
+			desc: "items slice",
+			globalSchema: `
+type: object
+properties:
+  slice:
+    type: array
+    items:
+    - type: string
+    - type: integer
+`,
+			expectedCreateErrors: []string{"spec.validation.openAPIV3Schema.properties[slice].items: Forbidden: items must be a schema object and not an array"},
+		},
+		{
+			desc: "items slice in value validation",
+			globalSchema: `
+type: object
+properties:
+  slice:
+    type: array
+    items:
+      type: string
+    not:
+      items:
+      - type: string
+`,
+			expectedCreateErrors: []string{"spec.validation.openAPIV3Schema.properties[slice].not.items: Forbidden: items must be a schema object and not an array"},
+		},
 	}
 
 	for i := range tests {
@@ -1353,10 +1433,21 @@ not:
 
 			// create CRDs
 			crd, err = apiExtensionClient.ApiextensionsV1beta1().CustomResourceDefinitions().Create(crd)
-			if tst.expectedCreateError && err == nil {
-				t.Fatalf("expected error, got none")
-			} else if !tst.expectedCreateError && err != nil {
+			if len(tst.expectedCreateErrors) > 0 && err == nil {
+				t.Fatalf("expected create errors, got none")
+			} else if len(tst.expectedCreateErrors) == 0 && err != nil {
 				t.Fatalf("unexpected create error: %v", err)
+			} else if err != nil {
+				for _, expectedErr := range tst.expectedCreateErrors {
+					if !strings.Contains(err.Error(), expectedErr) {
+						t.Errorf("expected error containing '%s', got '%s'", expectedErr, err.Error())
+					}
+				}
+				for _, unexpectedErr := range tst.unexpectedCreateErrors {
+					if strings.Contains(err.Error(), unexpectedErr) {
+						t.Errorf("unexpected error containing '%s': '%s'", unexpectedErr, err.Error())
+					}
+				}
 			}
 			if err != nil {
 				return

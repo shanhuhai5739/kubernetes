@@ -27,6 +27,8 @@ import (
 	"k8s.io/apiextensions-apiserver/test/integration/fixtures"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/dynamic"
 )
 
@@ -71,9 +73,12 @@ func TestChangeCRD(t *testing.T) {
 			default:
 			}
 
+			time.Sleep(10 * time.Millisecond)
+
 			noxuDefinitionToUpdate, err := apiExtensionsClient.ApiextensionsV1beta1().CustomResourceDefinitions().Get(noxuDefinition.Name, metav1.GetOptions{})
 			if err != nil {
-				t.Fatal(err)
+				t.Error(err)
+				continue
 			}
 			if len(noxuDefinitionToUpdate.Spec.Versions) == 1 {
 				v2 := noxuDefinitionToUpdate.Spec.Versions[0]
@@ -85,31 +90,59 @@ func TestChangeCRD(t *testing.T) {
 				noxuDefinitionToUpdate.Spec.Versions = noxuDefinitionToUpdate.Spec.Versions[0:1]
 			}
 			if _, err := apiExtensionsClient.ApiextensionsV1beta1().CustomResourceDefinitions().Update(noxuDefinitionToUpdate); err != nil && !apierrors.IsConflict(err) {
-				t.Fatal(err)
+				t.Error(err)
+				continue
 			}
-			time.Sleep(10 * time.Millisecond)
 		}
 	}()
 
-	// Set up 100 loops creating and reading custom resources
-	for i := 0; i < 100; i++ {
+	// Set up 10 loops creating and reading and watching custom resources
+	for i := 0; i < 10; i++ {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
 			noxuInstanceToCreate := fixtures.NewNoxuInstance(ns, fmt.Sprintf("foo-%d", i))
 			if _, err := noxuNamespacedResourceClient.Create(noxuInstanceToCreate, metav1.CreateOptions{}); err != nil {
-				t.Fatal(err)
+				t.Error(err)
+				return
 			}
 			for {
+				time.Sleep(10 * time.Millisecond)
 				select {
 				case <-stopChan:
 					return
 				default:
 					if _, err := noxuNamespacedResourceClient.Get(noxuInstanceToCreate.GetName(), metav1.GetOptions{}); err != nil {
-						t.Fatal(err)
+						t.Error(err)
+						continue
 					}
 				}
+			}
+		}(i)
+
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			for {
 				time.Sleep(10 * time.Millisecond)
+				select {
+				case <-stopChan:
+					return
+				default:
+					w, err := noxuNamespacedResourceClient.Watch(metav1.ListOptions{})
+					if err != nil {
+						t.Errorf("unexpected error establishing watch: %v", err)
+						continue
+					}
+					for event := range w.ResultChan() {
+						switch event.Type {
+						case watch.Added, watch.Modified, watch.Deleted:
+							// all expected
+						default:
+							t.Errorf("unexpected watch event: %#v", event)
+						}
+					}
+				}
 			}
 		}(i)
 	}
@@ -121,5 +154,15 @@ func TestChangeCRD(t *testing.T) {
 	close(stopChan)
 
 	// Let loops drain
-	wg.Wait()
+	drained := make(chan struct{})
+	go func() {
+		defer close(drained)
+		wg.Wait()
+	}()
+
+	select {
+	case <-drained:
+	case <-time.After(wait.ForeverTestTimeout):
+		t.Error("timed out waiting for clients to complete")
+	}
 }

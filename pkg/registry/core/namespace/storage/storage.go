@@ -58,7 +58,7 @@ type FinalizeREST struct {
 }
 
 // NewREST returns a RESTStorage object that will work against namespaces.
-func NewREST(optsGetter generic.RESTOptionsGetter) (*REST, *StatusREST, *FinalizeREST) {
+func NewREST(optsGetter generic.RESTOptionsGetter) (*REST, *StatusREST, *FinalizeREST, error) {
 	store := &genericregistry.Store{
 		NewFunc:                  func() runtime.Object { return &api.Namespace{} },
 		NewListFunc:              func() runtime.Object { return &api.NamespaceList{} },
@@ -76,7 +76,7 @@ func NewREST(optsGetter generic.RESTOptionsGetter) (*REST, *StatusREST, *Finaliz
 	}
 	options := &generic.StoreOptions{RESTOptions: optsGetter, AttrFunc: namespace.GetAttrs}
 	if err := store.CompleteWithOptions(options); err != nil {
-		panic(err) // TODO: Propagate error up
+		return nil, nil, nil, err
 	}
 
 	statusStore := *store
@@ -85,7 +85,7 @@ func NewREST(optsGetter generic.RESTOptionsGetter) (*REST, *StatusREST, *Finaliz
 	finalizeStore := *store
 	finalizeStore.UpdateStrategy = namespace.FinalizeStrategy
 
-	return &REST{store: store, status: &statusStore}, &StatusREST{store: &statusStore}, &FinalizeREST{store: &finalizeStore}
+	return &REST{store: store, status: &statusStore}, &StatusREST{store: &statusStore}, &FinalizeREST{store: &finalizeStore}, nil
 }
 
 func (r *REST) NamespaceScoped() bool {
@@ -125,7 +125,7 @@ func (r *REST) Export(ctx context.Context, name string, opts metav1.ExportOption
 }
 
 // Delete enforces life-cycle rules for namespace termination
-func (r *REST) Delete(ctx context.Context, name string, options *metav1.DeleteOptions) (runtime.Object, bool, error) {
+func (r *REST) Delete(ctx context.Context, name string, deleteValidation rest.ValidateObjectFunc, options *metav1.DeleteOptions) (runtime.Object, bool, error) {
 	nsObj, err := r.Get(ctx, name, &metav1.GetOptions{})
 	if err != nil {
 		return nil, false, err
@@ -177,6 +177,9 @@ func (r *REST) Delete(ctx context.Context, name string, options *metav1.DeleteOp
 				if !ok {
 					// wrong type
 					return nil, fmt.Errorf("expected *api.Namespace, got %v", existing)
+				}
+				if err := deleteValidation(ctx, existingNamespace); err != nil {
+					return nil, err
 				}
 				// Set the deletion timestamp if needed
 				if existingNamespace.DeletionTimestamp.IsZero() {
@@ -235,10 +238,9 @@ func (r *REST) Delete(ctx context.Context, name string, options *metav1.DeleteOp
 
 	// prior to final deletion, we must ensure that finalizers is empty
 	if len(namespace.Spec.Finalizers) != 0 {
-		err = apierrors.NewConflict(api.Resource("namespaces"), namespace.Name, fmt.Errorf("The system is ensuring all content is removed from this namespace.  Upon completion, this namespace will automatically be purged by the system."))
-		return nil, false, err
+		return namespace, false, nil
 	}
-	return r.store.Delete(ctx, name, options)
+	return r.store.Delete(ctx, name, deleteValidation, options)
 }
 
 // ShouldDeleteNamespaceDuringUpdate adds namespace-specific spec.finalizer checks on top of the default generic ShouldDeleteDuringUpdate behavior

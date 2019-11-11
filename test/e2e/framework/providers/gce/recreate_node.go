@@ -27,6 +27,8 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
+	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	testutils "k8s.io/kubernetes/test/utils"
 )
 
@@ -47,22 +49,23 @@ var _ = ginkgo.Describe("Recreate [Feature:Recreate]", func() {
 	ginkgo.BeforeEach(func() {
 		framework.SkipUnlessProviderIs("gce", "gke")
 		var err error
-		numNodes, err := framework.NumberOfRegisteredNodes(f.ClientSet)
+		numNodes, err := e2enode.TotalRegistered(f.ClientSet)
 		framework.ExpectNoError(err)
-		originalNodes, err = framework.CheckNodesReady(f.ClientSet, numNodes, framework.NodeReadyInitialTimeout)
+		originalNodes, err = e2enode.CheckReady(f.ClientSet, numNodes, framework.NodeReadyInitialTimeout)
 		framework.ExpectNoError(err)
 
 		framework.Logf("Got the following nodes before recreate %v", nodeNames(originalNodes))
 
 		ps, err = testutils.NewPodStore(f.ClientSet, systemNamespace, labels.Everything(), fields.Everything())
+		framework.ExpectNoError(err)
 		allPods := ps.List()
-		originalPods := framework.FilterNonRestartablePods(allPods)
+		originalPods := e2epod.FilterNonRestartablePods(allPods)
 		originalPodNames = make([]string, len(originalPods))
 		for i, p := range originalPods {
 			originalPodNames[i] = p.ObjectMeta.Name
 		}
 
-		if !framework.CheckPodsRunningReadyOrSucceeded(f.ClientSet, systemNamespace, originalPodNames, framework.PodReadyBeforeTimeout) {
+		if !e2epod.CheckPodsRunningReadyOrSucceeded(f.ClientSet, systemNamespace, originalPodNames, framework.PodReadyBeforeTimeout) {
 			framework.Failf("At least one pod wasn't running and ready or succeeded at test start.")
 		}
 
@@ -92,17 +95,17 @@ var _ = ginkgo.Describe("Recreate [Feature:Recreate]", func() {
 
 // Recreate all the nodes in the test instance group
 func testRecreate(c clientset.Interface, ps *testutils.PodStore, systemNamespace string, nodes []v1.Node, podNames []string) {
-	err := recreateNodes(c, nodes)
+	err := RecreateNodes(c, nodes)
 	if err != nil {
 		framework.Failf("Test failed; failed to start the restart instance group command.")
 	}
 
-	err = waitForNodeBootIdsToChange(c, nodes, framework.RecreateNodeReadyAgainTimeout)
+	err = WaitForNodeBootIdsToChange(c, nodes, framework.RecreateNodeReadyAgainTimeout)
 	if err != nil {
 		framework.Failf("Test failed; failed to recreate at least one node in %v.", framework.RecreateNodeReadyAgainTimeout)
 	}
 
-	nodesAfter, err := framework.CheckNodesReady(c, len(nodes), framework.RestartNodeReadyAgainTimeout)
+	nodesAfter, err := e2enode.CheckReady(c, len(nodes), framework.RestartNodeReadyAgainTimeout)
 	framework.ExpectNoError(err)
 	framework.Logf("Got the following nodes after recreate: %v", nodeNames(nodesAfter))
 
@@ -113,10 +116,10 @@ func testRecreate(c clientset.Interface, ps *testutils.PodStore, systemNamespace
 
 	// Make sure the pods from before node recreation are running/completed
 	podCheckStart := time.Now()
-	podNamesAfter, err := framework.WaitForNRestartablePods(ps, len(podNames), framework.RestartPodReadyAgainTimeout)
+	podNamesAfter, err := e2epod.WaitForNRestartablePods(ps, len(podNames), framework.RestartPodReadyAgainTimeout)
 	framework.ExpectNoError(err)
 	remaining := framework.RestartPodReadyAgainTimeout - time.Since(podCheckStart)
-	if !framework.CheckPodsRunningReadyOrSucceeded(c, systemNamespace, podNamesAfter, remaining) {
+	if !e2epod.CheckPodsRunningReadyOrSucceeded(c, systemNamespace, podNamesAfter, remaining) {
 		framework.Failf("At least one pod wasn't running and ready after the restart.")
 	}
 }

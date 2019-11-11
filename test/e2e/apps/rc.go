@@ -27,9 +27,10 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/uuid"
 	"k8s.io/apimachinery/pkg/util/wait"
+	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/pkg/controller/replication"
 	"k8s.io/kubernetes/test/e2e/framework"
-	e2elog "k8s.io/kubernetes/test/e2e/framework/log"
+	e2epod "k8s.io/kubernetes/test/e2e/framework/pod"
 	imageutils "k8s.io/kubernetes/test/utils/image"
 
 	"github.com/onsi/ginkgo"
@@ -51,7 +52,7 @@ var _ = SIGDescribe("ReplicationController", func() {
 	ginkgo.It("should serve a basic image on each replica with a private image", func() {
 		// requires private images
 		framework.SkipUnlessProviderIs("gce", "gke")
-		privateimage := imageutils.GetConfig(imageutils.ServeHostname)
+		privateimage := imageutils.GetConfig(imageutils.Agnhost)
 		privateimage.SetRegistry(imageutils.PrivateRegistry)
 		TestReplicationControllerServeImageOrFail(f, "private", privateimage.GetE2EImage())
 	})
@@ -84,7 +85,7 @@ var _ = SIGDescribe("ReplicationController", func() {
 	})
 })
 
-func newRC(rsName string, replicas int32, rcPodLabels map[string]string, imageName string, image string) *v1.ReplicationController {
+func newRC(rsName string, replicas int32, rcPodLabels map[string]string, imageName string, image string, args []string) *v1.ReplicationController {
 	zero := int64(0)
 	return &v1.ReplicationController{
 		ObjectMeta: metav1.ObjectMeta{
@@ -102,6 +103,7 @@ func newRC(rsName string, replicas int32, rcPodLabels map[string]string, imageNa
 						{
 							Name:  imageName,
 							Image: image,
+							Args:  args,
 						},
 					},
 				},
@@ -122,19 +124,19 @@ func TestReplicationControllerServeImageOrFail(f *framework.Framework, test stri
 	// The source for the Docker container kubernetes/serve_hostname is
 	// in contrib/for-demos/serve_hostname
 	ginkgo.By(fmt.Sprintf("Creating replication controller %s", name))
-	newRC := newRC(name, replicas, map[string]string{"name": name}, name, image)
+	newRC := newRC(name, replicas, map[string]string{"name": name}, name, image, []string{"serve-hostname"})
 	newRC.Spec.Template.Spec.Containers[0].Ports = []v1.ContainerPort{{ContainerPort: 9376}}
 	_, err := f.ClientSet.CoreV1().ReplicationControllers(f.Namespace.Name).Create(newRC)
 	framework.ExpectNoError(err)
 
 	// Check that pods for the new RC were created.
 	// TODO: Maybe switch PodsCreated to just check owner references.
-	pods, err := framework.PodsCreated(f.ClientSet, f.Namespace.Name, name, replicas)
+	pods, err := e2epod.PodsCreated(f.ClientSet, f.Namespace.Name, name, replicas)
 	framework.ExpectNoError(err)
 
 	// Wait for the pods to enter the running state. Waiting loops until the pods
 	// are running so non-running pods cause a timeout for this test.
-	e2elog.Logf("Ensuring all pods for ReplicationController %q are running", name)
+	framework.Logf("Ensuring all pods for ReplicationController %q are running", name)
 	running := int32(0)
 	for _, pod := range pods.Items {
 		if pod.DeletionTimestamp != nil {
@@ -150,7 +152,7 @@ func TestReplicationControllerServeImageOrFail(f *framework.Framework, test stri
 			}
 		}
 		framework.ExpectNoError(err)
-		e2elog.Logf("Pod %q is running (conditions: %+v)", pod.Name, pod.Status.Conditions)
+		framework.Logf("Pod %q is running (conditions: %+v)", pod.Name, pod.Status.Conditions)
 		running++
 	}
 
@@ -160,11 +162,11 @@ func TestReplicationControllerServeImageOrFail(f *framework.Framework, test stri
 	}
 
 	// Verify that something is listening.
-	e2elog.Logf("Trying to dial the pod")
+	framework.Logf("Trying to dial the pod")
 	retryTimeout := 2 * time.Minute
 	retryInterval := 5 * time.Second
 	label := labels.SelectorFromSet(labels.Set(map[string]string{"name": name}))
-	err = wait.Poll(retryInterval, retryTimeout, framework.NewPodProxyResponseChecker(f.ClientSet, f.Namespace.Name, label, name, true, pods).CheckAllResponses)
+	err = wait.Poll(retryInterval, retryTimeout, e2epod.NewProxyResponseChecker(f.ClientSet, f.Namespace.Name, label, name, true, pods).CheckAllResponses)
 	if err != nil {
 		framework.Failf("Did not get expected responses within the timeout period of %.2f seconds.", retryTimeout.Seconds())
 	}
@@ -179,7 +181,7 @@ func testReplicationControllerConditionCheck(f *framework.Framework) {
 	namespace := f.Namespace.Name
 	name := "condition-test"
 
-	e2elog.Logf("Creating quota %q that allows only two pods to run in the current namespace", name)
+	framework.Logf("Creating quota %q that allows only two pods to run in the current namespace", name)
 	quota := newPodQuota(name, "2")
 	_, err := c.CoreV1().ResourceQuotas(namespace).Create(quota)
 	framework.ExpectNoError(err)
@@ -199,7 +201,7 @@ func testReplicationControllerConditionCheck(f *framework.Framework) {
 	framework.ExpectNoError(err)
 
 	ginkgo.By(fmt.Sprintf("Creating rc %q that asks for more than the allowed pod quota", name))
-	rc := newRC(name, 3, map[string]string{"name": name}, NginxImageName, NginxImage)
+	rc := newRC(name, 3, map[string]string{"name": name}, WebserverImageName, WebserverImage, nil)
 	rc, err = c.CoreV1().ReplicationControllers(namespace).Create(rc)
 	framework.ExpectNoError(err)
 
@@ -226,7 +228,7 @@ func testReplicationControllerConditionCheck(f *framework.Framework) {
 	framework.ExpectNoError(err)
 
 	ginkgo.By(fmt.Sprintf("Scaling down rc %q to satisfy pod quota", name))
-	rc, err = framework.UpdateReplicationControllerWithRetries(c, namespace, name, func(update *v1.ReplicationController) {
+	rc, err = updateReplicationControllerWithRetries(c, namespace, name, func(update *v1.ReplicationController) {
 		x := int32(2)
 		update.Spec.Replicas = &x
 	})
@@ -269,7 +271,7 @@ func testRCAdoptMatchingOrphans(f *framework.Framework) {
 			Containers: []v1.Container{
 				{
 					Name:  name,
-					Image: NginxImage,
+					Image: WebserverImage,
 				},
 			},
 		},
@@ -277,7 +279,7 @@ func testRCAdoptMatchingOrphans(f *framework.Framework) {
 
 	ginkgo.By("When a replication controller with a matching selector is created")
 	replicas := int32(1)
-	rcSt := newRC(name, replicas, map[string]string{"name": name}, name, NginxImage)
+	rcSt := newRC(name, replicas, map[string]string{"name": name}, name, WebserverImage, nil)
 	rcSt.Spec.Selector = map[string]string{"name": name}
 	rc, err := f.ClientSet.CoreV1().ReplicationControllers(f.Namespace.Name).Create(rcSt)
 	framework.ExpectNoError(err)
@@ -306,13 +308,13 @@ func testRCReleaseControlledNotMatching(f *framework.Framework) {
 	name := "pod-release"
 	ginkgo.By("Given a ReplicationController is created")
 	replicas := int32(1)
-	rcSt := newRC(name, replicas, map[string]string{"name": name}, name, NginxImage)
+	rcSt := newRC(name, replicas, map[string]string{"name": name}, name, WebserverImage, nil)
 	rcSt.Spec.Selector = map[string]string{"name": name}
 	rc, err := f.ClientSet.CoreV1().ReplicationControllers(f.Namespace.Name).Create(rcSt)
 	framework.ExpectNoError(err)
 
 	ginkgo.By("When the matched label of one of its pods change")
-	pods, err := framework.PodsCreated(f.ClientSet, f.Namespace.Name, rc.Name, replicas)
+	pods, err := e2epod.PodsCreated(f.ClientSet, f.Namespace.Name, rc.Name, replicas)
 	framework.ExpectNoError(err)
 
 	p := pods.Items[0]
@@ -346,4 +348,33 @@ func testRCReleaseControlledNotMatching(f *framework.Framework) {
 		return true, nil
 	})
 	framework.ExpectNoError(err)
+}
+
+type updateRcFunc func(d *v1.ReplicationController)
+
+// updateReplicationControllerWithRetries retries updating the given rc on conflict with the following steps:
+// 1. Get latest resource
+// 2. applyUpdate
+// 3. Update the resource
+func updateReplicationControllerWithRetries(c clientset.Interface, namespace, name string, applyUpdate updateRcFunc) (*v1.ReplicationController, error) {
+	var rc *v1.ReplicationController
+	var updateErr error
+	pollErr := wait.PollImmediate(10*time.Millisecond, 1*time.Minute, func() (bool, error) {
+		var err error
+		if rc, err = c.CoreV1().ReplicationControllers(namespace).Get(name, metav1.GetOptions{}); err != nil {
+			return false, err
+		}
+		// Apply the update, then attempt to push it to the apiserver.
+		applyUpdate(rc)
+		if rc, err = c.CoreV1().ReplicationControllers(namespace).Update(rc); err == nil {
+			framework.Logf("Updating replication controller %q", name)
+			return true, nil
+		}
+		updateErr = err
+		return false, nil
+	})
+	if pollErr == wait.ErrWaitTimeout {
+		pollErr = fmt.Errorf("couldn't apply the provided updated to rc %q: %v", name, updateErr)
+	}
+	return rc, pollErr
 }

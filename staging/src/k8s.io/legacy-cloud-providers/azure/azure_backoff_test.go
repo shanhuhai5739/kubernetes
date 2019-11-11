@@ -1,3 +1,5 @@
+// +build !providerless
+
 /*
 Copyright 2017 The Kubernetes Authors.
 
@@ -118,6 +120,11 @@ func TestProcessRetryResponse(t *testing.T) {
 		{
 			code: http.StatusOK,
 			stop: true,
+		},
+		{
+			code: http.StatusOK,
+			err:  fmt.Errorf("some error"),
+			stop: false,
 		},
 		{
 			code: 399,

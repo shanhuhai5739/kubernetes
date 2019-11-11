@@ -419,6 +419,26 @@ func claimWithAnnotation(name, value string, claims []*v1.PersistentVolumeClaim)
 	return claims
 }
 
+// volumeWithAnnotation saves given annotation into given volume.
+// Meant to be used to compose volume specified inline in a test.
+func volumeWithAnnotation(name, value string, volume *v1.PersistentVolume) *v1.PersistentVolume {
+	if volume.Annotations == nil {
+		volume.Annotations = map[string]string{name: value}
+	} else {
+		volume.Annotations[name] = value
+	}
+	return volume
+}
+
+// volumesWithAnnotation saves given annotation into given volumes.
+// Meant to be used to compose volumes specified inline in a test.
+func volumesWithAnnotation(name, value string, volumes []*v1.PersistentVolume) []*v1.PersistentVolume {
+	for _, volume := range volumes {
+		volumeWithAnnotation(name, value, volume)
+	}
+	return volumes
+}
+
 // claimWithAccessMode saves given access into given claims.
 // Meant to be used to compose claims specified inline in a test.
 func claimWithAccessMode(modes []v1.PersistentVolumeAccessMode, claims []*v1.PersistentVolumeClaim) []*v1.PersistentVolumeClaim {
@@ -451,9 +471,11 @@ const operationRecycle = "Recycle"
 var (
 	classGold                    string = "gold"
 	classSilver                  string = "silver"
+	classCopper                  string = "copper"
 	classEmpty                   string = ""
 	classNonExisting             string = "non-existing"
 	classExternal                string = "external"
+	classExternalWait            string = "external-wait"
 	classUnknownInternal         string = "unknown-internal"
 	classUnsupportedMountOptions string = "unsupported-mountoptions"
 	classLarge                   string = "large"
@@ -464,7 +486,7 @@ var (
 
 // wrapTestWithPluginCalls returns a testCall that:
 // - configures controller with a volume plugin that implements recycler,
-//   deleter and provisioner. The plugin retunrs provided errors when a volume
+//   deleter and provisioner. The plugin returns provided errors when a volume
 //   is deleted, recycled or provisioned.
 // - calls given testCall
 func wrapTestWithPluginCalls(expectedRecycleCalls, expectedDeleteCalls []error, expectedProvisionCalls []provisionCall, toWrap testCall) testCall {
@@ -499,6 +521,12 @@ func wrapTestWithProvisionCalls(expectedProvisionCalls []provisionCall, toWrap t
 	return wrapTestWithPluginCalls(nil, nil, expectedProvisionCalls, toWrap)
 }
 
+type fakeCSINameTranslator struct{}
+
+func (t fakeCSINameTranslator) GetCSINameFromInTreeName(pluginName string) (string, error) {
+	return "vendor.com/MockCSIPlugin", nil
+}
+
 // wrapTestWithCSIMigrationProvisionCalls returns a testCall that:
 // - configures controller with a volume plugin that emulates CSI migration
 // - calls given testCall
@@ -508,9 +536,7 @@ func wrapTestWithCSIMigrationProvisionCalls(toWrap testCall) testCall {
 			isMigratedToCSI: true,
 		}
 		ctrl.volumePluginMgr.InitPlugins([]vol.VolumePlugin{plugin}, nil /* prober */, ctrl)
-		ctrl.csiNameFromIntreeNameHook = func(string) (string, error) {
-			return "vendor.com/MockCSIPlugin", nil
-		}
+		ctrl.translator = fakeCSINameTranslator{}
 		return toWrap(ctrl, reactor, test)
 	}
 }

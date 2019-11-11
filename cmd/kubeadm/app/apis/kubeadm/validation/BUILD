@@ -13,8 +13,6 @@ go_library(
         "//cmd/kubeadm/app/constants:go_default_library",
         "//cmd/kubeadm/app/features:go_default_library",
         "//cmd/kubeadm/app/util:go_default_library",
-        "//pkg/apis/core/validation:go_default_library",
-        "//pkg/registry/core/service/ipallocator:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/util/sets:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/util/validation:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/util/validation/field:go_default_library",
@@ -22,6 +20,8 @@ go_library(
         "//staging/src/k8s.io/cluster-bootstrap/token/util:go_default_library",
         "//vendor/github.com/pkg/errors:go_default_library",
         "//vendor/github.com/spf13/pflag:go_default_library",
+        "//vendor/k8s.io/utils/integer:go_default_library",
+        "//vendor/k8s.io/utils/net:go_default_library",
     ],
 )
 
@@ -34,6 +34,7 @@ go_test(
         "//cmd/kubeadm/app/apis/kubeadm/v1beta2:go_default_library",
         "//pkg/proxy/apis/config:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/apis/meta/v1:go_default_library",
+        "//staging/src/k8s.io/apimachinery/pkg/util/sets:go_default_library",
         "//staging/src/k8s.io/apimachinery/pkg/util/validation/field:go_default_library",
         "//vendor/github.com/spf13/pflag:go_default_library",
         "//vendor/k8s.io/utils/pointer:go_default_library",

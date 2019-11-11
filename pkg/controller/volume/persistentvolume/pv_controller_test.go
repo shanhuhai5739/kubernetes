@@ -17,17 +17,20 @@ limitations under the License.
 package persistentvolume
 
 import (
+	"errors"
 	"testing"
 	"time"
 
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	storagev1 "k8s.io/api/storage/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/watch"
 	"k8s.io/client-go/informers"
 	"k8s.io/client-go/kubernetes/fake"
+	storagelisters "k8s.io/client-go/listers/storage/v1"
 	core "k8s.io/client-go/testing"
 	"k8s.io/client-go/tools/cache"
+	csitrans "k8s.io/csi-translation-lib"
 	"k8s.io/klog"
 	"k8s.io/kubernetes/pkg/controller"
 	pvtesting "k8s.io/kubernetes/pkg/controller/volume/persistentvolume/testing"
@@ -100,6 +103,130 @@ func TestControllerSync(t *testing.T) {
 				return nil
 			},
 		},
+		{
+			// deleteClaim with a bound claim makes bound volume released with external deleter.
+			// delete the corresponding volume from apiserver, and report latency metric
+			"5-5 - delete claim and delete volume report metric",
+			volumesWithAnnotation(pvutil.AnnDynamicallyProvisioned, "gcr.io/vendor-csi",
+				newVolumeArray("volume5-6", "10Gi", "uid5-6", "claim5-6", v1.VolumeBound, v1.PersistentVolumeReclaimDelete, classExternal, pvutil.AnnBoundByController)),
+			novolumes,
+			claimWithAnnotation(pvutil.AnnStorageProvisioner, "gcr.io/vendor-csi",
+				newClaimArray("claim5-5", "uid5-5", "1Gi", "volume5-5", v1.ClaimBound, &classExternal, pvutil.AnnBoundByController, pvutil.AnnBindCompleted)),
+			noclaims,
+			noevents, noerrors,
+			// Custom test function that generates a delete claim event which should have been caught by
+			// "deleteClaim" to remove the claim from controller's cache, after that, a volume deleted
+			// event will be generated to trigger "deleteVolume" call for metric reporting
+			func(ctrl *PersistentVolumeController, reactor *pvtesting.VolumeReactor, test controllerTest) error {
+				test.initialVolumes[0].Annotations[pvutil.AnnDynamicallyProvisioned] = "gcr.io/vendor-csi"
+				obj := ctrl.claims.List()[0]
+				claim := obj.(*v1.PersistentVolumeClaim)
+				reactor.DeleteClaimEvent(claim)
+				for len(ctrl.claims.ListKeys()) > 0 {
+					time.Sleep(10 * time.Millisecond)
+				}
+				// claim has been removed from controller's cache, generate a volume deleted event
+				volume := ctrl.volumes.store.List()[0].(*v1.PersistentVolume)
+				reactor.DeleteVolumeEvent(volume)
+				return nil
+			},
+		},
+		{
+			// deleteClaim with a bound claim makes bound volume released with external deleter pending
+			// there should be an entry in operation timestamps cache in controller
+			"5-6 - delete claim and waiting for external volume deletion",
+			volumesWithAnnotation(pvutil.AnnDynamicallyProvisioned, "gcr.io/vendor-csi",
+				newVolumeArray("volume5-6", "10Gi", "uid5-6", "claim5-6", v1.VolumeBound, v1.PersistentVolumeReclaimDelete, classExternal, pvutil.AnnBoundByController)),
+			volumesWithAnnotation(pvutil.AnnDynamicallyProvisioned, "gcr.io/vendor-csi",
+				newVolumeArray("volume5-6", "10Gi", "uid5-6", "claim5-6", v1.VolumeReleased, v1.PersistentVolumeReclaimDelete, classExternal, pvutil.AnnBoundByController)),
+			claimWithAnnotation(pvutil.AnnStorageProvisioner, "gcr.io/vendor-csi",
+				newClaimArray("claim5-6", "uid5-6", "1Gi", "volume5-6", v1.ClaimBound, &classExternal, pvutil.AnnBoundByController, pvutil.AnnBindCompleted)),
+			noclaims,
+			noevents, noerrors,
+			// Custom test function that generates a delete claim event which should have been caught by
+			// "deleteClaim" to remove the claim from controller's cache and mark bound volume to be released
+			func(ctrl *PersistentVolumeController, reactor *pvtesting.VolumeReactor, test controllerTest) error {
+				// should have been provisioned by external provisioner
+				obj := ctrl.claims.List()[0]
+				claim := obj.(*v1.PersistentVolumeClaim)
+				reactor.DeleteClaimEvent(claim)
+				// wait until claim is cleared from cache, i.e., deleteClaim is called
+				for len(ctrl.claims.ListKeys()) > 0 {
+					time.Sleep(10 * time.Millisecond)
+				}
+				// make sure the operation timestamp cache is NOT empty
+				if !ctrl.operationTimestamps.Has("volume5-6") {
+					return errors.New("failed checking timestamp cache: should not be empty")
+				}
+				return nil
+			},
+		},
+		{
+			// deleteVolume event issued before deleteClaim, no metric should have been reported
+			// and no delete operation start timestamp should be inserted into controller.operationTimestamps cache
+			"5-7 - delete volume event makes claim lost, delete claim event will not report metric",
+			newVolumeArray("volume5-7", "10Gi", "uid5-7", "claim5-7", v1.VolumeBound, v1.PersistentVolumeReclaimDelete, classExternal, pvutil.AnnBoundByController, pvutil.AnnDynamicallyProvisioned),
+			novolumes,
+			claimWithAnnotation(pvutil.AnnStorageProvisioner, "gcr.io/vendor-csi",
+				newClaimArray("claim5-7", "uid5-7", "1Gi", "volume5-7", v1.ClaimBound, &classExternal, pvutil.AnnBoundByController, pvutil.AnnBindCompleted)),
+			noclaims,
+			[]string{"Warning ClaimLost"},
+			noerrors,
+			// Custom test function that generates a delete claim event which should have been caught by
+			// "deleteClaim" to remove the claim from controller's cache and mark bound volume to be released
+			func(ctrl *PersistentVolumeController, reactor *pvtesting.VolumeReactor, test controllerTest) error {
+				volume := ctrl.volumes.store.List()[0].(*v1.PersistentVolume)
+				reactor.DeleteVolumeEvent(volume)
+				for len(ctrl.volumes.store.ListKeys()) > 0 {
+					time.Sleep(10 * time.Millisecond)
+				}
+				// trying to remove the claim as well
+				obj := ctrl.claims.List()[0]
+				claim := obj.(*v1.PersistentVolumeClaim)
+				reactor.DeleteClaimEvent(claim)
+				// wait until claim is cleared from cache, i.e., deleteClaim is called
+				for len(ctrl.claims.ListKeys()) > 0 {
+					time.Sleep(10 * time.Millisecond)
+				}
+				// make sure operation timestamp cache is empty
+				if ctrl.operationTimestamps.Has("volume5-7") {
+					return errors.New("failed checking timestamp cache")
+				}
+				return nil
+			},
+		},
+		{
+			// delete a claim waiting for being bound cleans up provision(volume ref == "") entry from timestamp cache
+			"5-8 - delete claim cleans up operation timestamp cache for provision",
+			novolumes,
+			novolumes,
+			claimWithAnnotation(pvutil.AnnStorageProvisioner, "gcr.io/vendor-csi",
+				newClaimArray("claim5-8", "uid5-8", "1Gi", "", v1.ClaimPending, &classExternal)),
+			noclaims,
+			[]string{"Normal ExternalProvisioning"},
+			noerrors,
+			// Custom test function that generates a delete claim event which should have been caught by
+			// "deleteClaim" to remove the claim from controller's cache and mark bound volume to be released
+			func(ctrl *PersistentVolumeController, reactor *pvtesting.VolumeReactor, test controllerTest) error {
+				// wait until the provision timestamp has been inserted
+				for !ctrl.operationTimestamps.Has("default/claim5-8") {
+					time.Sleep(10 * time.Millisecond)
+				}
+				// delete the claim
+				obj := ctrl.claims.List()[0]
+				claim := obj.(*v1.PersistentVolumeClaim)
+				reactor.DeleteClaimEvent(claim)
+				// wait until claim is cleared from cache, i.e., deleteClaim is called
+				for len(ctrl.claims.ListKeys()) > 0 {
+					time.Sleep(10 * time.Millisecond)
+				}
+				// make sure operation timestamp cache is empty
+				if ctrl.operationTimestamps.Has("default/claim5-8") {
+					return errors.New("failed checking timestamp cache")
+				}
+				return nil
+			},
+		},
 	}
 
 	for _, test := range tests {
@@ -120,14 +247,28 @@ func TestControllerSync(t *testing.T) {
 			t.Fatalf("Test %q construct persistent volume failed: %v", test.name, err)
 		}
 
+		// Inject storage classes into controller via a custom lister for test [5-5]
+		storageClasses := []*storagev1.StorageClass{
+			makeStorageClass(classExternal, &modeImmediate),
+		}
+
+		storageClasses[0].Provisioner = "gcr.io/vendor-csi"
+		indexer := cache.NewIndexer(cache.MetaNamespaceKeyFunc, cache.Indexers{})
+		for _, class := range storageClasses {
+			indexer.Add(class)
+		}
+		ctrl.classLister = storagelisters.NewStorageClassLister(indexer)
+
 		reactor := newVolumeReactor(client, ctrl, fakeVolumeWatch, fakeClaimWatch, test.errors)
 		for _, claim := range test.initialClaims {
+			claim = claim.DeepCopy()
 			reactor.AddClaim(claim)
 			go func(claim *v1.PersistentVolumeClaim) {
 				fakeClaimWatch.Add(claim)
 			}(claim)
 		}
 		for _, volume := range test.initialVolumes {
+			volume = volume.DeepCopy()
 			reactor.AddVolume(volume)
 			go func(volume *v1.PersistentVolume) {
 				fakeVolumeWatch.Add(volume)
@@ -236,7 +377,7 @@ func TestControllerCacheParsingError(t *testing.T) {
 	}
 }
 
-func makePVCClass(scName *string, hasSelectNodeAnno bool) *v1.PersistentVolumeClaim {
+func makePVCClass(scName *string) *v1.PersistentVolumeClaim {
 	claim := &v1.PersistentVolumeClaim{
 		ObjectMeta: metav1.ObjectMeta{
 			Annotations: map[string]string{},
@@ -244,10 +385,6 @@ func makePVCClass(scName *string, hasSelectNodeAnno bool) *v1.PersistentVolumeCl
 		Spec: v1.PersistentVolumeClaimSpec{
 			StorageClassName: scName,
 		},
-	}
-
-	if hasSelectNodeAnno {
-		claim.Annotations[pvutil.AnnSelectedNode] = "node-name"
 	}
 
 	return claim
@@ -262,36 +399,32 @@ func makeStorageClass(scName string, mode *storagev1.VolumeBindingMode) *storage
 	}
 }
 
-func TestDelayBinding(t *testing.T) {
+func TestDelayBindingMode(t *testing.T) {
 	tests := map[string]struct {
 		pvc         *v1.PersistentVolumeClaim
 		shouldDelay bool
 		shouldFail  bool
 	}{
 		"nil-class": {
-			pvc:         makePVCClass(nil, false),
+			pvc:         makePVCClass(nil),
 			shouldDelay: false,
 		},
 		"class-not-found": {
-			pvc:         makePVCClass(&classNotHere, false),
+			pvc:         makePVCClass(&classNotHere),
 			shouldDelay: false,
 		},
 		"no-mode-class": {
-			pvc:         makePVCClass(&classNoMode, false),
+			pvc:         makePVCClass(&classNoMode),
 			shouldDelay: false,
 			shouldFail:  true,
 		},
 		"immediate-mode-class": {
-			pvc:         makePVCClass(&classImmediateMode, false),
+			pvc:         makePVCClass(&classImmediateMode),
 			shouldDelay: false,
 		},
 		"wait-mode-class": {
-			pvc:         makePVCClass(&classWaitMode, false),
+			pvc:         makePVCClass(&classWaitMode),
 			shouldDelay: true,
-		},
-		"wait-mode-class-with-selectedNode": {
-			pvc:         makePVCClass(&classWaitMode, true),
-			shouldDelay: false,
 		},
 	}
 
@@ -306,6 +439,7 @@ func TestDelayBinding(t *testing.T) {
 	classInformer := informerFactory.Storage().V1().StorageClasses()
 	ctrl := &PersistentVolumeController{
 		classLister: classInformer.Lister(),
+		translator:  csitrans.New(),
 	}
 
 	for _, class := range classes {
@@ -315,7 +449,7 @@ func TestDelayBinding(t *testing.T) {
 	}
 
 	for name, test := range tests {
-		shouldDelay, err := ctrl.shouldDelayBinding(test.pvc)
+		shouldDelay, err := pvutil.IsDelayBindingMode(test.pvc, ctrl.classLister)
 		if err != nil && !test.shouldFail {
 			t.Errorf("Test %q returned error: %v", name, err)
 		}

@@ -31,21 +31,21 @@ run_daemonset_tests() {
   # Command
   kubectl apply -f hack/testdata/rollingupdate-daemonset.yaml "${kube_flags[@]:?}"
   # Template Generation should be 1
-  kube::test::get_object_assert 'daemonsets bind' "{{${template_generation_field:?}}}" '1'
+  kube::test::get_object_assert 'daemonsets bind' "{{${generation_field:?}}}" '1'
   kubectl apply -f hack/testdata/rollingupdate-daemonset.yaml "${kube_flags[@]:?}"
   # Template Generation should stay 1
-  kube::test::get_object_assert 'daemonsets bind' "{{${template_generation_field:?}}}" '1'
+  kube::test::get_object_assert 'daemonsets bind' "{{${generation_field:?}}}" '1'
   # Test set commands
   kubectl set image daemonsets/bind "${kube_flags[@]:?}" "*=k8s.gcr.io/pause:test-cmd"
-  kube::test::get_object_assert 'daemonsets bind' "{{${template_generation_field:?}}}" '2'
+  kube::test::get_object_assert 'daemonsets bind' "{{${generation_field:?}}}" '2'
   kubectl set env daemonsets/bind "${kube_flags[@]:?}" foo=bar
-  kube::test::get_object_assert 'daemonsets bind' "{{${template_generation_field:?}}}" '3'
+  kube::test::get_object_assert 'daemonsets bind' "{{${generation_field:?}}}" '3'
   kubectl set resources daemonsets/bind "${kube_flags[@]:?}" --limits=cpu=200m,memory=512Mi
-  kube::test::get_object_assert 'daemonsets bind' "{{${template_generation_field:?}}}" '4'
+  kube::test::get_object_assert 'daemonsets bind' "{{${generation_field:?}}}" '4'
 
   # Rollout restart should change generation
-  kubectl rollout restart daemonset/bind "${kube_flags[@]}"
-  kube::test::get_object_assert 'daemonsets bind' "{{${template_generation_field}}}" '5'
+  kubectl rollout restart daemonset/bind "${kube_flags[@]:?}"
+  kube::test::get_object_assert 'daemonsets bind' "{{${generation_field:?}}}" '5'
 
   # Clean up
   kubectl delete -f hack/testdata/rollingupdate-daemonset.yaml "${kube_flags[@]:?}"
@@ -127,12 +127,9 @@ run_kubectl_apply_deployments_tests() {
   # apply new deployment with new template labels
   kubectl apply -f hack/testdata/null-propagation/deployment-l2.yaml "${kube_flags[@]:?}"
   # check right labels exists
-  kube::test::get_object_assert 'deployments my-depl' "{{.spec.template.metadata.labels.l1}}" '<no value>'
-  kube::test::get_object_assert 'deployments my-depl' "{{.spec.selector.matchLabels.l1}}" '<no value>'
+  kube::test::get_object_assert 'deployments my-depl' "{{.spec.template.metadata.labels.l1}}" 'l1'
+  kube::test::get_object_assert 'deployments my-depl' "{{.spec.selector.matchLabels.l1}}" 'l1'
   kube::test::get_object_assert 'deployments my-depl' "{{.metadata.labels.l1}}" '<no value>'
-  kube::test::get_object_assert 'deployments my-depl' "{{.spec.template.metadata.labels.l2}}" 'l2'
-  kube::test::get_object_assert 'deployments my-depl' "{{.spec.selector.matchLabels.l2}}" 'l2'
-  kube::test::get_object_assert 'deployments my-depl' "{{.metadata.labels.l2}}" 'l2'
 
   # cleanup
   # need to explicitly remove replicasets and pods because we changed the deployment selector and orphaned things
@@ -189,24 +186,20 @@ run_deployment_tests() {
   # and old generator was used, iow. old defaults are applied
   output_message=$(kubectl get deployment.apps/test-nginx-extensions -o jsonpath='{.spec.revisionHistoryLimit}')
   kube::test::if_has_not_string "${output_message}" '2'
-  # Ensure we can interact with deployments through extensions and apps endpoints
-  output_message=$(kubectl get deployment.extensions -o=jsonpath='{.items[0].apiVersion}' 2>&1 "${kube_flags[@]:?}")
-  kube::test::if_has_string "${output_message}" 'extensions/v1beta1'
+  # Ensure we can interact with deployments through apps endpoints
   output_message=$(kubectl get deployment.apps -o=jsonpath='{.items[0].apiVersion}' 2>&1 "${kube_flags[@]:?}")
   kube::test::if_has_string "${output_message}" 'apps/v1'
   # Clean up
   kubectl delete deployment test-nginx-extensions "${kube_flags[@]:?}"
 
   # Test kubectl create deployment
-  kubectl create deployment test-nginx-apps --image=k8s.gcr.io/nginx:test-cmd --generator=deployment-basic/apps.v1beta1
+  kubectl create deployment test-nginx-apps --image=k8s.gcr.io/nginx:test-cmd --generator=deployment-basic/apps.v1
   # Post-Condition: Deployment "nginx" is created.
   kube::test::get_object_assert 'deploy test-nginx-apps' "{{${container_name_field:?}}}" 'nginx'
   # and new generator was used, iow. new defaults are applied
   output_message=$(kubectl get deployment/test-nginx-apps -o jsonpath='{.spec.revisionHistoryLimit}')
-  kube::test::if_has_string "${output_message}" '2'
-  # Ensure we can interact with deployments through extensions and apps endpoints
-  output_message=$(kubectl get deployment.extensions -o=jsonpath='{.items[0].apiVersion}' 2>&1 "${kube_flags[@]:?}")
-  kube::test::if_has_string "${output_message}" 'extensions/v1beta1'
+  kube::test::if_has_string "${output_message}" '10'
+  # Ensure we can interact with deployments through apps endpoints
   output_message=$(kubectl get deployment.apps -o=jsonpath='{.items[0].apiVersion}' 2>&1 "${kube_flags[@]:?}")
   kube::test::if_has_string "${output_message}" 'apps/v1'
   # Describe command (resource only) should print detailed information
@@ -303,7 +296,7 @@ run_deployment_tests() {
   sleep 1
   kube::test::get_object_assert deployment "{{range.items}}{{${image_field0:?}}}:{{end}}" "${IMAGE_DEPLOYMENT_R1}:"
   # Rollback to revision 1000000 - should be no-op
-  ! kubectl rollout undo deployment nginx --to-revision=1000000 "${kube_flags[@]:?}"
+  ! kubectl rollout undo deployment nginx --to-revision=1000000 "${kube_flags[@]:?}" || exit 1
   kube::test::get_object_assert deployment "{{range.items}}{{${image_field0:?}}}:{{end}}" "${IMAGE_DEPLOYMENT_R1}:"
   # Rollback to last revision
   kubectl rollout undo deployment nginx "${kube_flags[@]:?}"
@@ -312,9 +305,9 @@ run_deployment_tests() {
   # Pause the deployment
   kubectl-with-retry rollout pause deployment nginx "${kube_flags[@]:?}"
   # A paused deployment cannot be rolled back
-  ! kubectl rollout undo deployment nginx "${kube_flags[@]:?}"
+  ! kubectl rollout undo deployment nginx "${kube_flags[@]:?}" || exit 1
   # A paused deployment cannot be restarted
-  ! kubectl rollout restart deployment nginx "${kube_flags[@]:?}"
+  ! kubectl rollout restart deployment nginx "${kube_flags[@]:?}" || exit 1
   # Resume the deployment
   kubectl-with-retry rollout resume deployment nginx "${kube_flags[@]:?}"
   # The resumed deployment can now be rolled back
@@ -323,7 +316,7 @@ run_deployment_tests() {
   newrs="$(kubectl describe deployment nginx | grep NewReplicaSet | awk '{print $2}')"
   kubectl get rs "${newrs}" -o yaml | grep "deployment.kubernetes.io/revision-history: 1,3"
   # Check that trying to watch the status of a superseded revision returns an error
-  ! kubectl rollout status deployment/nginx --revision=3
+  ! kubectl rollout status deployment/nginx --revision=3 || exit 1
   # Restarting the deployment creates a new replicaset
   kubectl rollout restart deployment/nginx
   sleep 1
@@ -349,7 +342,7 @@ run_deployment_tests() {
   kube::test::get_object_assert deployment "{{range.items}}{{${image_field0:?}}}:{{end}}" "${IMAGE_DEPLOYMENT_R2}:"
   kube::test::get_object_assert deployment "{{range.items}}{{${image_field1:?}}}:{{end}}" "${IMAGE_PERL}:"
   # Set non-existing container should fail
-  ! kubectl set image deployment nginx-deployment redis=redis "${kube_flags[@]:?}"
+  ! kubectl set image deployment nginx-deployment redis=redis "${kube_flags[@]:?}" || exit 1
   # Set image of deployments without specifying name
   kubectl set image deployments --all nginx="${IMAGE_DEPLOYMENT_R1}" "${kube_flags[@]:?}"
   kube::test::get_object_assert deployment "{{range.items}}{{${image_field0:?}}}:{{end}}" "${IMAGE_DEPLOYMENT_R1}:"
@@ -366,7 +359,7 @@ run_deployment_tests() {
   kubectl set image deployment nginx-deployment "*=${IMAGE_DEPLOYMENT_R1}" "${kube_flags[@]:?}"
   kube::test::get_object_assert deployment "{{range.items}}{{${image_field0:?}}}:{{end}}" "${IMAGE_DEPLOYMENT_R1}:"
   kube::test::get_object_assert deployment "{{range.items}}{{${image_field1:?}}}:{{end}}" "${IMAGE_DEPLOYMENT_R1}:"
-  # Set image of all containners of the deployment again when image not change
+  # Set image of all containers of the deployment again when image not change
   kubectl set image deployment nginx-deployment "*=${IMAGE_DEPLOYMENT_R1}" "${kube_flags[@]:?}"
   kube::test::get_object_assert deployment "{{range.items}}{{${image_field0:?}}}:{{end}}" "${IMAGE_DEPLOYMENT_R1}:"
   kube::test::get_object_assert deployment "{{range.items}}{{${image_field1:?}}}:{{end}}" "${IMAGE_DEPLOYMENT_R1}:"
@@ -647,7 +640,7 @@ run_rs_tests() {
   # Post-condition: no replica set exists
   kube::test::get_object_assert rs "{{range.items}}{{${id_field:?}}}:{{end}}" ''
 
-  if kube::test::if_supports_resource "${horizontalpodautoscalers:?}" ; then
+  if kube::test::if_supports_resource "horizontalpodautoscalers" ; then
     ### Auto scale replica set
     # Pre-condition: no replica set exists
     kube::test::get_object_assert rs "{{range.items}}{{${id_field:?}}}:{{end}}" ''
@@ -663,7 +656,7 @@ run_rs_tests() {
     kube::test::get_object_assert 'hpa frontend' "{{${hpa_min_field:?}}} {{${hpa_max_field:?}}} {{${hpa_cpu_field:?}}}" '2 3 80'
     kubectl delete hpa frontend "${kube_flags[@]:?}"
     # autoscale without specifying --max should fail
-    ! kubectl autoscale rs frontend "${kube_flags[@]:?}"
+    ! kubectl autoscale rs frontend "${kube_flags[@]:?}" || exit 1
     # Clean up
     kubectl delete rs frontend "${kube_flags[@]:?}"
   fi

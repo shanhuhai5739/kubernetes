@@ -28,12 +28,6 @@ import (
 type InitConfiguration struct {
 	metav1.TypeMeta `json:",inline"`
 
-	// ClusterConfiguration holds the cluster-wide information, and embeds that struct (which can be (un)marshalled separately as well)
-	// When InitConfiguration is marshalled to bytes in the external version, this information IS NOT preserved (which can be seen from
-	// the `json:"-"` tag. This is due to that when InitConfiguration is (un)marshalled, it turns into two YAML documents, one for the
-	// InitConfiguration and ClusterConfiguration. Hence, the information must not be duplicated, and is therefore omitted here.
-	ClusterConfiguration `json:"-"`
-
 	// `kubeadm init`-only information. These fields are solely used the first time `kubeadm init` runs.
 	// After that, the information in the fields IS NOT uploaded to the `kubeadm-config` ConfigMap
 	// that is used by `kubeadm upgrade` for instance. These fields must be omitempty.
@@ -208,13 +202,16 @@ type NodeRegistrationOptions struct {
 
 	// Taints specifies the taints the Node API object should be registered with. If this field is unset, i.e. nil, in the `kubeadm init` process
 	// it will be defaulted to []v1.Taint{'node-role.kubernetes.io/master=""'}. If you don't want to taint your control-plane node, set this field to an
-	// empty slice, i.e. `taints: {}` in the YAML file. This field is solely used for Node registration.
+	// empty slice, i.e. `taints: []` in the YAML file. This field is solely used for Node registration.
 	Taints []v1.Taint `json:"taints"`
 
 	// KubeletExtraArgs passes through extra arguments to the kubelet. The arguments here are passed to the kubelet command line via the environment file
 	// kubeadm writes at runtime for the kubelet to source. This overrides the generic base-level configuration in the kubelet-config-1.X ConfigMap
 	// Flags have higher priority when parsing. These values are local and specific to the node kubeadm is executing on.
 	KubeletExtraArgs map[string]string `json:"kubeletExtraArgs,omitempty"`
+
+	// IgnorePreflightErrors provides a slice of pre-flight errors to be ignored when the current node is registered.
+	IgnorePreflightErrors []string `json:"ignorePreflightErrors,omitempty"`
 }
 
 // Networking contains elements describing cluster's networking configuration

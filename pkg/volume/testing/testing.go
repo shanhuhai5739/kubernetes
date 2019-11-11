@@ -28,19 +28,23 @@ import (
 	"time"
 
 	authenticationv1 "k8s.io/api/authentication/v1"
-	"k8s.io/api/core/v1"
+	v1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/uuid"
+	"k8s.io/client-go/informers"
 	clientset "k8s.io/client-go/kubernetes"
+	storagelistersv1 "k8s.io/client-go/listers/storage/v1"
 	storagelisters "k8s.io/client-go/listers/storage/v1beta1"
+	"k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/tools/record"
 	utiltesting "k8s.io/client-go/util/testing"
 	cloudprovider "k8s.io/cloud-provider"
 	"k8s.io/kubernetes/pkg/util/mount"
 	. "k8s.io/kubernetes/pkg/volume"
 	"k8s.io/kubernetes/pkg/volume/util"
+	"k8s.io/kubernetes/pkg/volume/util/hostutil"
 	"k8s.io/kubernetes/pkg/volume/util/recyclerclient"
 	"k8s.io/kubernetes/pkg/volume/util/subpath"
 	"k8s.io/kubernetes/pkg/volume/util/volumepathhandler"
@@ -68,11 +72,13 @@ type fakeVolumeHost struct {
 	pluginMgr       VolumePluginMgr
 	cloud           cloudprovider.Interface
 	mounter         mount.Interface
+	hostUtil        hostutil.HostUtils
 	exec            mount.Exec
 	nodeLabels      map[string]string
 	nodeName        string
 	subpather       subpath.Interface
 	csiDriverLister storagelisters.CSIDriverLister
+	informerFactory informers.SharedInformerFactory
 }
 
 var _ VolumeHost = &fakeVolumeHost{}
@@ -101,18 +107,18 @@ func NewFakeVolumeHostWithCSINodeName(rootDir string, kubeClient clientset.Inter
 	return volHost
 }
 
-func newFakeVolumeHost(rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, cloud cloudprovider.Interface, pathToTypeMap map[string]mount.FileType) *fakeVolumeHost {
+func newFakeVolumeHost(rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, cloud cloudprovider.Interface, pathToTypeMap map[string]hostutil.FileType) *fakeVolumeHost {
 	host := &fakeVolumeHost{rootDir: rootDir, kubeClient: kubeClient, cloud: cloud}
-	host.mounter = &mount.FakeMounter{
-		Filesystem: pathToTypeMap,
-	}
+	host.mounter = mount.NewFakeMounter(nil)
+	host.hostUtil = hostutil.NewFakeHostUtil(pathToTypeMap)
 	host.exec = mount.NewFakeExec(nil)
 	host.pluginMgr.InitPlugins(plugins, nil /* prober */, host)
 	host.subpather = &subpath.FakeSubpath{}
+	host.informerFactory = informers.NewSharedInformerFactory(kubeClient, time.Minute)
 	return host
 }
 
-func NewFakeVolumeHostWithMounterFSType(rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, pathToTypeMap map[string]mount.FileType) *fakeVolumeHost {
+func NewFakeVolumeHostWithMounterFSType(rootDir string, kubeClient clientset.Interface, plugins []VolumePlugin, pathToTypeMap map[string]hostutil.FileType) *fakeVolumeHost {
 	volHost := newFakeVolumeHost(rootDir, kubeClient, plugins, nil, pathToTypeMap)
 	return volHost
 }
@@ -151,6 +157,10 @@ func (f *fakeVolumeHost) GetCloudProvider() cloudprovider.Interface {
 
 func (f *fakeVolumeHost) GetMounter(pluginName string) mount.Interface {
 	return f.mounter
+}
+
+func (f *fakeVolumeHost) GetHostUtil() hostutil.HostUtils {
+	return f.hostUtil
 }
 
 func (f *fakeVolumeHost) GetSubpather() subpath.Interface {
@@ -765,11 +775,11 @@ func (fv *FakeVolume) CanMount() error {
 	return nil
 }
 
-func (fv *FakeVolume) SetUp(fsGroup *int64) error {
+func (fv *FakeVolume) SetUp(mounterArgs MounterArgs) error {
 	fv.Lock()
 	defer fv.Unlock()
 	fv.SetUpCallCount++
-	return fv.SetUpAt(fv.getPath(), fsGroup)
+	return fv.SetUpAt(fv.getPath(), mounterArgs)
 }
 
 func (fv *FakeVolume) GetSetUpCallCount() int {
@@ -778,7 +788,7 @@ func (fv *FakeVolume) GetSetUpCallCount() int {
 	return fv.SetUpCallCount
 }
 
-func (fv *FakeVolume) SetUpAt(dir string, fsGroup *int64) error {
+func (fv *FakeVolume) SetUpAt(dir string, mounterArgs MounterArgs) error {
 	return os.MkdirAll(dir, 0750)
 }
 
@@ -906,6 +916,11 @@ func (fv *FakeVolume) Attach(spec *Spec, nodeName types.NodeName) (string, error
 	if exist {
 		if nodeName == UncertainAttachNode {
 			return "/dev/vdb-test", nil
+		}
+		// even if volume was previously attached to time out, we need to keep returning error
+		// so as reconciler can not confirm this volume as attached.
+		if nodeName == TimeoutAttachNode {
+			return "", fmt.Errorf("Timed out to attach volume %q to node %q", volumeName, nodeName)
 		}
 		if volumeNode == nodeName || volumeNode == MultiAttachNode || nodeName == MultiAttachNode {
 			return "/dev/vdb-test", nil
@@ -1116,7 +1131,7 @@ func FindEmptyDirectoryUsageOnTmpfs() (*resource.Quantity, error) {
 		return nil, err
 	}
 	defer os.RemoveAll(tmpDir)
-	out, err := exec.Command("nice", "-n", "19", "du", "-s", "-B", "1", tmpDir).CombinedOutput()
+	out, err := exec.Command("nice", "-n", "19", "du", "-x", "-s", "-B", "1", tmpDir).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("failed command 'du' on %s with error %v", tmpDir, err)
 	}
@@ -1490,11 +1505,28 @@ func (f *fakeVolumeHost) CSIDriverLister() storagelisters.CSIDriverLister {
 	return f.csiDriverLister
 }
 
-func (f *fakeVolumeHost) CSINodeLister() storagelisters.CSINodeLister {
+func (f *fakeVolumeHost) CSIDriversSynced() cache.InformerSynced {
 	// not needed for testing
 	return nil
 }
 
+func (f *fakeVolumeHost) CSINodeLister() storagelistersv1.CSINodeLister {
+	// not needed for testing
+	return nil
+}
+
+func (f *fakeVolumeHost) GetInformerFactory() informers.SharedInformerFactory {
+	return f.informerFactory
+}
+
 func (f *fakeVolumeHost) IsAttachDetachController() bool {
 	return true
+}
+
+func (f *fakeVolumeHost) SetKubeletError(err error) {
+	return
+}
+
+func (f *fakeVolumeHost) WaitForCacheSync() error {
+	return nil
 }

@@ -25,6 +25,7 @@ import (
 	"crypto/x509/pkix"
 	"encoding/pem"
 	"fmt"
+	"io/ioutil"
 	"math/big"
 	"net"
 	"net/http"
@@ -37,7 +38,7 @@ import (
 	compute "google.golang.org/api/compute/v1"
 	"k8s.io/klog"
 
-	apps "k8s.io/api/apps/v1"
+	appsv1 "k8s.io/api/apps/v1"
 	v1 "k8s.io/api/core/v1"
 	networkingv1beta1 "k8s.io/api/networking/v1beta1"
 	apierrs "k8s.io/apimachinery/pkg/api/errors"
@@ -49,9 +50,12 @@ import (
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/kubernetes/test/e2e/framework"
+	e2enode "k8s.io/kubernetes/test/e2e/framework/node"
+	e2eservice "k8s.io/kubernetes/test/e2e/framework/service"
 	"k8s.io/kubernetes/test/e2e/framework/testfiles"
 	"k8s.io/kubernetes/test/e2e/manifest"
 	testutils "k8s.io/kubernetes/test/utils"
+	imageutils "k8s.io/kubernetes/test/utils/image"
 
 	"github.com/onsi/ginkgo"
 )
@@ -91,12 +95,6 @@ const (
 
 	// IngressReqTimeout is the timeout on a single http request.
 	IngressReqTimeout = 10 * time.Second
-
-	// healthz port used to verify glbc restarted correctly on the master.
-	glbcHealthzPort = 8086
-
-	// General cloud resource poll timeout (eg: create static ip, firewall etc)
-	cloudResourcePollTimeout = 5 * time.Minute
 
 	// NEGAnnotation is NEG annotation.
 	NEGAnnotation = "cloud.google.com/neg"
@@ -159,6 +157,51 @@ type NegStatus struct {
 	Zones                 []string         `json:"zones,omitempty"`
 }
 
+// SimpleGET executes a get on the given url, returns error if non-200 returned.
+func SimpleGET(c *http.Client, url, host string) (string, error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return "", err
+	}
+	req.Host = host
+	res, err := c.Do(req)
+	if err != nil {
+		return "", err
+	}
+	defer res.Body.Close()
+	rawBody, err := ioutil.ReadAll(res.Body)
+	if err != nil {
+		return "", err
+	}
+	body := string(rawBody)
+	if res.StatusCode != http.StatusOK {
+		err = fmt.Errorf(
+			"GET returned http error %v", res.StatusCode)
+	}
+	return body, err
+}
+
+// PollURL polls till the url responds with a healthy http code. If
+// expectUnreachable is true, it breaks on first non-healthy http code instead.
+func PollURL(route, host string, timeout time.Duration, interval time.Duration, httpClient *http.Client, expectUnreachable bool) error {
+	var lastBody string
+	pollErr := wait.PollImmediate(interval, timeout, func() (bool, error) {
+		var err error
+		lastBody, err = SimpleGET(httpClient, route, host)
+		if err != nil {
+			framework.Logf("host %v path %v: %v unreachable", host, route, err)
+			return expectUnreachable, nil
+		}
+		framework.Logf("host %v path %v: reached", host, route)
+		return !expectUnreachable, nil
+	})
+	if pollErr != nil {
+		return fmt.Errorf("Failed to execute a successful GET within %v, Last response body for %v, host %v:\n%v\n\n%v",
+			timeout, route, host, lastBody, pollErr)
+	}
+	return nil
+}
+
 // CreateIngressComformanceTests generates an slice of sequential test cases:
 // a simple http ingress, ingress with HTTPS, ingress HTTPS with a modified hostname,
 // ingress https with a modified URLMap
@@ -213,7 +256,7 @@ func CreateIngressComformanceTests(jig *TestJig, ns string, annotations map[stri
 				})
 				ginkgo.By("Checking that " + pathToFail + " is not exposed by polling for failure")
 				route := fmt.Sprintf("http://%v%v", jig.Address, pathToFail)
-				framework.ExpectNoError(framework.PollURL(route, updateURLMapHost, framework.LoadBalancerCleanupTimeout, jig.PollInterval, &http.Client{Timeout: IngressReqTimeout}, true))
+				framework.ExpectNoError(PollURL(route, updateURLMapHost, e2eservice.LoadBalancerCleanupTimeout, jig.PollInterval, &http.Client{Timeout: IngressReqTimeout}, true))
 			},
 			fmt.Sprintf("Waiting for path updates to reflect in L7"),
 		},
@@ -383,7 +426,7 @@ func NewIngressTestJig(c clientset.Interface) *TestJig {
 	return &TestJig{
 		Client:       c,
 		RootCAs:      map[string][]byte{},
-		PollInterval: framework.LoadBalancerPollInterval,
+		PollInterval: e2eservice.LoadBalancerPollInterval,
 		Logger:       &E2ELogger{},
 	}
 }
@@ -396,10 +439,10 @@ func NewIngressTestJig(c clientset.Interface) *TestJig {
 func (j *TestJig) CreateIngress(manifestPath, ns string, ingAnnotations map[string]string, svcAnnotations map[string]string) {
 	var err error
 	read := func(file string) string {
-		return string(testfiles.ReadOrDie(filepath.Join(manifestPath, file), ginkgo.Fail))
+		return string(testfiles.ReadOrDie(filepath.Join(manifestPath, file)))
 	}
 	exists := func(file string) bool {
-		return testfiles.Exists(filepath.Join(manifestPath, file), ginkgo.Fail)
+		return testfiles.Exists(filepath.Join(manifestPath, file))
 	}
 
 	j.Logger.Infof("creating replication controller")
@@ -660,7 +703,7 @@ func (j *TestJig) pollIngressWithCert(ing *networkingv1beta1.Ingress, address st
 			}
 			route := fmt.Sprintf("%v://%v%v", proto, address, p.Path)
 			j.Logger.Infof("Testing route %v host %v with simple GET", route, rules.Host)
-			if err := framework.PollURL(route, rules.Host, timeout, j.PollInterval, timeoutClient, false); err != nil {
+			if err := PollURL(route, rules.Host, timeout, j.PollInterval, timeoutClient, false); err != nil {
 				return err
 			}
 		}
@@ -672,14 +715,14 @@ func (j *TestJig) pollIngressWithCert(ing *networkingv1beta1.Ingress, address st
 // WaitForIngress waits for the Ingress to get an address.
 // WaitForIngress returns when it gets the first 200 response
 func (j *TestJig) WaitForIngress(waitForNodePort bool) {
-	if err := j.WaitForGivenIngressWithTimeout(j.Ingress, waitForNodePort, framework.LoadBalancerPollTimeout); err != nil {
+	if err := j.WaitForGivenIngressWithTimeout(j.Ingress, waitForNodePort, e2eservice.LoadBalancerPollTimeout); err != nil {
 		framework.Failf("error in waiting for ingress to get an address: %s", err)
 	}
 }
 
 // WaitForIngressToStable waits for the LB return 100 consecutive 200 responses.
 func (j *TestJig) WaitForIngressToStable() {
-	if err := wait.Poll(10*time.Second, framework.LoadBalancerCreateTimeoutDefault, func() (bool, error) {
+	if err := wait.Poll(10*time.Second, e2eservice.LoadBalancerPropagationTimeoutDefault, func() (bool, error) {
 		_, err := j.GetDistinctResponseFromIngress()
 		if err != nil {
 			return false, nil
@@ -718,19 +761,19 @@ func (j *TestJig) WaitForGivenIngressWithTimeout(ing *networkingv1beta1.Ingress,
 // Ingress. Hostnames and certificate need to be explicitly passed in.
 func (j *TestJig) WaitForIngressWithCert(waitForNodePort bool, knownHosts []string, cert []byte) error {
 	// Wait for the loadbalancer IP.
-	address, err := j.WaitForIngressAddress(j.Client, j.Ingress.Namespace, j.Ingress.Name, framework.LoadBalancerPollTimeout)
+	address, err := j.WaitForIngressAddress(j.Client, j.Ingress.Namespace, j.Ingress.Name, e2eservice.LoadBalancerPollTimeout)
 	if err != nil {
-		return fmt.Errorf("Ingress failed to acquire an IP address within %v", framework.LoadBalancerPollTimeout)
+		return fmt.Errorf("Ingress failed to acquire an IP address within %v", e2eservice.LoadBalancerPollTimeout)
 	}
 
-	return j.pollIngressWithCert(j.Ingress, address, knownHosts, cert, waitForNodePort, framework.LoadBalancerPollTimeout)
+	return j.pollIngressWithCert(j.Ingress, address, knownHosts, cert, waitForNodePort, e2eservice.LoadBalancerPollTimeout)
 }
 
 // VerifyURL polls for the given iterations, in intervals, and fails if the
 // given url returns a non-healthy http code even once.
 func (j *TestJig) VerifyURL(route, host string, iterations int, interval time.Duration, httpClient *http.Client) error {
 	for i := 0; i < iterations; i++ {
-		b, err := framework.SimpleGET(httpClient, route, host)
+		b, err := SimpleGET(httpClient, route, host)
 		if err != nil {
 			framework.Logf(b)
 			return err
@@ -743,11 +786,11 @@ func (j *TestJig) VerifyURL(route, host string, iterations int, interval time.Du
 
 func (j *TestJig) pollServiceNodePort(ns, name string, port int) error {
 	// TODO: Curl all nodes?
-	u, err := framework.GetNodePortURL(j.Client, ns, name, port)
+	u, err := e2enode.GetPortURL(j.Client, ns, name, port)
 	if err != nil {
 		return err
 	}
-	return framework.PollURL(u, "", 30*time.Second, j.PollInterval, &http.Client{Timeout: IngressReqTimeout}, false)
+	return PollURL(u, "", 30*time.Second, j.PollInterval, &http.Client{Timeout: IngressReqTimeout}, false)
 }
 
 // GetIngressNodePorts returns related backend services' nodePorts.
@@ -810,16 +853,16 @@ func (j *TestJig) ConstructFirewallForIngress(firewallRuleName string, nodeTags 
 // GetDistinctResponseFromIngress tries GET call to the ingress VIP and return all distinct responses.
 func (j *TestJig) GetDistinctResponseFromIngress() (sets.String, error) {
 	// Wait for the loadbalancer IP.
-	address, err := j.WaitForIngressAddress(j.Client, j.Ingress.Namespace, j.Ingress.Name, framework.LoadBalancerPollTimeout)
+	address, err := j.WaitForIngressAddress(j.Client, j.Ingress.Namespace, j.Ingress.Name, e2eservice.LoadBalancerPollTimeout)
 	if err != nil {
-		framework.Failf("Ingress failed to acquire an IP address within %v", framework.LoadBalancerPollTimeout)
+		framework.Failf("Ingress failed to acquire an IP address within %v", e2eservice.LoadBalancerPollTimeout)
 	}
 	responses := sets.NewString()
 	timeoutClient := &http.Client{Timeout: IngressReqTimeout}
 
 	for i := 0; i < 100; i++ {
 		url := fmt.Sprintf("http://%v", address)
-		res, err := framework.SimpleGET(timeoutClient, url, "")
+		res, err := SimpleGET(timeoutClient, url, "")
 		if err != nil {
 			j.Logger.Errorf("Failed to GET %q. Got responses: %q: %v", url, res, err)
 			return responses, err
@@ -831,17 +874,34 @@ func (j *TestJig) GetDistinctResponseFromIngress() (sets.String, error) {
 
 // NginxIngressController manages implementation details of Ingress on Nginx.
 type NginxIngressController struct {
-	Ns         string
-	rc         *v1.ReplicationController
-	pod        *v1.Pod
-	Client     clientset.Interface
-	externalIP string
+	Ns     string
+	rc     *v1.ReplicationController
+	pod    *v1.Pod
+	Client clientset.Interface
+	lbSvc  *v1.Service
 }
 
 // Init initializes the NginxIngressController
 func (cont *NginxIngressController) Init() {
+	// Set up a LoadBalancer service in front of nginx ingress controller and pass it via
+	// --publish-service flag (see <IngressManifestPath>/nginx/rc.yaml) to make it work in private
+	// clusters, i.e. clusters where nodes don't have public IPs.
+	framework.Logf("Creating load balancer service for nginx ingress controller")
+	serviceJig := e2eservice.NewTestJig(cont.Client, cont.Ns, "nginx-ingress-lb")
+	_, err := serviceJig.CreateTCPService(func(svc *v1.Service) {
+		svc.Spec.Type = v1.ServiceTypeLoadBalancer
+		svc.Spec.Selector = map[string]string{"k8s-app": "nginx-ingress-lb"}
+		svc.Spec.Ports = []v1.ServicePort{
+			{Name: "http", Port: 80},
+			{Name: "https", Port: 443},
+			{Name: "stats", Port: 18080}}
+	})
+	framework.ExpectNoError(err)
+	cont.lbSvc, err = serviceJig.WaitForLoadBalancer(e2eservice.GetServiceLoadBalancerCreationTimeout(cont.Client))
+	framework.ExpectNoError(err)
+
 	read := func(file string) string {
-		return string(testfiles.ReadOrDie(filepath.Join(IngressManifestPath, "nginx", file), ginkgo.Fail))
+		return string(testfiles.ReadOrDie(filepath.Join(IngressManifestPath, "nginx", file)))
 	}
 	framework.Logf("initializing nginx ingress controller")
 	framework.RunKubectlOrDieInput(read("rc.yaml"), "create", "-f", "-", fmt.Sprintf("--namespace=%v", cont.Ns))
@@ -859,9 +919,16 @@ func (cont *NginxIngressController) Init() {
 		framework.Failf("Failed to find nginx ingress controller pods with selector %v", sel)
 	}
 	cont.pod = &pods.Items[0]
-	cont.externalIP, err = framework.GetHostExternalAddress(cont.Client, cont.pod)
-	framework.ExpectNoError(err)
-	framework.Logf("ingress controller running in pod %v on ip %v", cont.pod.Name, cont.externalIP)
+	framework.Logf("ingress controller running in pod %v", cont.pod.Name)
+}
+
+// TearDown cleans up the NginxIngressController.
+func (cont *NginxIngressController) TearDown() {
+	if cont.lbSvc == nil {
+		framework.Logf("No LoadBalancer service created, no cleanup necessary")
+		return
+	}
+	e2eservice.WaitForServiceDeletedWithFinalizer(cont.Client, cont.Ns, cont.lbSvc.Name)
 }
 
 func generateBacksideHTTPSIngressSpec(ns string) *networkingv1beta1.Ingress {
@@ -906,12 +973,12 @@ func generateBacksideHTTPSServiceSpec() *v1.Service {
 	}
 }
 
-func generateBacksideHTTPSDeploymentSpec() *apps.Deployment {
-	return &apps.Deployment{
+func generateBacksideHTTPSDeploymentSpec() *appsv1.Deployment {
+	return &appsv1.Deployment{
 		ObjectMeta: metav1.ObjectMeta{
 			Name: "echoheaders-https",
 		},
-		Spec: apps.DeploymentSpec{
+		Spec: appsv1.DeploymentSpec{
 			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{
 				"app": "echoheaders-https",
 			}},
@@ -925,7 +992,7 @@ func generateBacksideHTTPSDeploymentSpec() *apps.Deployment {
 					Containers: []v1.Container{
 						{
 							Name:  "echoheaders-https",
-							Image: "k8s.gcr.io/echoserver:1.10",
+							Image: imageutils.GetE2EImage(imageutils.EchoServer),
 							Ports: []v1.ContainerPort{{
 								ContainerPort: 8443,
 								Name:          "echo-443",
@@ -939,7 +1006,7 @@ func generateBacksideHTTPSDeploymentSpec() *apps.Deployment {
 }
 
 // SetUpBacksideHTTPSIngress sets up deployment, service and ingress with backside HTTPS configured.
-func (j *TestJig) SetUpBacksideHTTPSIngress(cs clientset.Interface, namespace string, staticIPName string) (*apps.Deployment, *v1.Service, *networkingv1beta1.Ingress, error) {
+func (j *TestJig) SetUpBacksideHTTPSIngress(cs clientset.Interface, namespace string, staticIPName string) (*appsv1.Deployment, *v1.Service, *networkingv1beta1.Ingress, error) {
 	deployCreated, err := cs.AppsV1().Deployments(namespace).Create(generateBacksideHTTPSDeploymentSpec())
 	if err != nil {
 		return nil, nil, nil, err
@@ -963,7 +1030,7 @@ func (j *TestJig) SetUpBacksideHTTPSIngress(cs clientset.Interface, namespace st
 }
 
 // DeleteTestResource deletes given deployment, service and ingress.
-func (j *TestJig) DeleteTestResource(cs clientset.Interface, deploy *apps.Deployment, svc *v1.Service, ing *networkingv1beta1.Ingress) []error {
+func (j *TestJig) DeleteTestResource(cs clientset.Interface, deploy *appsv1.Deployment, svc *v1.Service, ing *networkingv1beta1.Ingress) []error {
 	var errs []error
 	if ing != nil {
 		if err := j.runDelete(ing); err != nil {

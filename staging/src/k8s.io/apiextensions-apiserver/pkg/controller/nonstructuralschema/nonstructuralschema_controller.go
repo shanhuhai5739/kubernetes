@@ -18,6 +18,7 @@ package nonstructuralschema
 
 import (
 	"fmt"
+	"sync"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -47,6 +48,11 @@ type ConditionController struct {
 	syncFn func(key string) error
 
 	queue workqueue.RateLimitingInterface
+
+	// last generation this controller updated the condition per CRD name (to avoid two
+	// different version of the apiextensions-apiservers in HA to fight for the right message)
+	lastSeenGenerationLock sync.Mutex
+	lastSeenGeneration     map[string]int64
 }
 
 // NewConditionController constructs a non-structural schema condition controller.
@@ -55,16 +61,17 @@ func NewConditionController(
 	crdClient client.CustomResourceDefinitionsGetter,
 ) *ConditionController {
 	c := &ConditionController{
-		crdClient: crdClient,
-		crdLister: crdInformer.Lister(),
-		crdSynced: crdInformer.Informer().HasSynced,
-		queue:     workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "non_structural_schema_condition_controller"),
+		crdClient:          crdClient,
+		crdLister:          crdInformer.Lister(),
+		crdSynced:          crdInformer.Informer().HasSynced,
+		queue:              workqueue.NewNamedRateLimitingQueue(workqueue.DefaultControllerRateLimiter(), "non_structural_schema_condition_controller"),
+		lastSeenGeneration: map[string]int64{},
 	}
 
 	crdInformer.Informer().AddEventHandler(cache.ResourceEventHandlerFuncs{
 		AddFunc:    c.addCustomResourceDefinition,
 		UpdateFunc: c.updateCustomResourceDefinition,
-		DeleteFunc: nil,
+		DeleteFunc: c.deleteCustomResourceDefinition,
 	})
 
 	c.syncFn = c.sync
@@ -90,10 +97,10 @@ func calculateCondition(in *apiextensions.CustomResourceDefinition) *apiextensio
 
 		pth := field.NewPath("spec", "validation", "openAPIV3Schema")
 
-		allErrs = append(allErrs, schema.ValidateStructural(s, pth)...)
+		allErrs = append(allErrs, schema.ValidateStructural(pth, s)...)
 	}
 
-	for _, v := range in.Spec.Versions {
+	for i, v := range in.Spec.Versions {
 		if v.Schema == nil || v.Schema.OpenAPIV3Schema == nil {
 			continue
 		}
@@ -105,9 +112,9 @@ func calculateCondition(in *apiextensions.CustomResourceDefinition) *apiextensio
 			return cond
 		}
 
-		pth := field.NewPath("spec", "version").Key(v.Name).Child("schema", "openAPIV3Schema")
+		pth := field.NewPath("spec", "versions").Index(i).Child("schema", "openAPIV3Schema")
 
-		allErrs = append(allErrs, schema.ValidateStructural(s, pth)...)
+		allErrs = append(allErrs, schema.ValidateStructural(pth, s)...)
 	}
 
 	if len(allErrs) == 0 {
@@ -128,6 +135,14 @@ func (c *ConditionController) sync(key string) error {
 	}
 	if err != nil {
 		return err
+	}
+
+	// avoid repeated calculation for the same generation
+	c.lastSeenGenerationLock.Lock()
+	lastSeen, seenBefore := c.lastSeenGeneration[inCustomResourceDefinition.Name]
+	c.lastSeenGenerationLock.Unlock()
+	if seenBefore && inCustomResourceDefinition.Generation <= lastSeen {
+		return nil
 	}
 
 	// check old condition
@@ -158,6 +173,12 @@ func (c *ConditionController) sync(key string) error {
 	if err != nil {
 		return err
 	}
+
+	// store generation in order to avoid repeated updates for the same generation (and potential
+	// fights of API server in HA environments).
+	c.lastSeenGenerationLock.Lock()
+	defer c.lastSeenGenerationLock.Unlock()
+	c.lastSeenGeneration[crd.Name] = crd.Generation
 
 	return nil
 }
@@ -209,7 +230,7 @@ func (c *ConditionController) processNextWorkItem() bool {
 func (c *ConditionController) enqueue(obj *apiextensions.CustomResourceDefinition) {
 	key, err := cache.DeletionHandlingMetaNamespaceKeyFunc(obj)
 	if err != nil {
-		utilruntime.HandleError(fmt.Errorf("Couldn't get key for object %#v: %v", obj, err))
+		utilruntime.HandleError(fmt.Errorf("couldn't get key for object %#v: %v", obj, err))
 		return
 	}
 
@@ -226,4 +247,24 @@ func (c *ConditionController) updateCustomResourceDefinition(obj, _ interface{})
 	castObj := obj.(*apiextensions.CustomResourceDefinition)
 	klog.V(4).Infof("Updating %s", castObj.Name)
 	c.enqueue(castObj)
+}
+
+func (c *ConditionController) deleteCustomResourceDefinition(obj interface{}) {
+	castObj, ok := obj.(*apiextensions.CustomResourceDefinition)
+	if !ok {
+		tombstone, ok := obj.(cache.DeletedFinalStateUnknown)
+		if !ok {
+			klog.Errorf("Couldn't get object from tombstone %#v", obj)
+			return
+		}
+		castObj, ok = tombstone.Obj.(*apiextensions.CustomResourceDefinition)
+		if !ok {
+			klog.Errorf("Tombstone contained object that is not expected %#v", obj)
+			return
+		}
+	}
+
+	c.lastSeenGenerationLock.Lock()
+	defer c.lastSeenGenerationLock.Unlock()
+	delete(c.lastSeenGeneration, castObj.Name)
 }

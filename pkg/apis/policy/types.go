@@ -48,7 +48,7 @@ type PodDisruptionBudgetSpec struct {
 // PodDisruptionBudget. Status may trail the actual state of a system.
 type PodDisruptionBudgetStatus struct {
 	// Most recent generation observed when updating this PDB status. PodDisruptionsAllowed and other
-	// status informatio is valid only if observedGeneration equals to PDB's object generation.
+	// status information is valid only if observedGeneration equals to PDB's object generation.
 	// +optional
 	ObservedGeneration int64
 
@@ -209,7 +209,8 @@ type PodSecurityPolicySpec struct {
 	// +optional
 	AllowedFlexVolumes []AllowedFlexVolume
 	// AllowedCSIDrivers is a whitelist of inline CSI drivers that must be explicitly set to be embedded within a pod spec.
-	// An empty value means no CSI drivers can run inline within a pod spec.
+	// An empty value indicates that any CSI driver can be used for inline ephemeral volumes.
+	// This is an alpha field, and is only honored if the API server enables the CSIInlineVolume feature gate.
 	// +optional
 	AllowedCSIDrivers []AllowedCSIDriver
 	// AllowedUnsafeSysctls is a list of explicitly allowed unsafe sysctls, defaults to none.
@@ -274,7 +275,8 @@ var AllowAllCapabilities api.Capability = "*"
 // FSType gives strong typing to different file systems that are used by volumes.
 type FSType string
 
-var (
+// Exported FSTypes.
+const (
 	AzureFile             FSType = "azureFile"
 	Flocker               FSType = "flocker"
 	FlexVolume            FSType = "flexVolume"

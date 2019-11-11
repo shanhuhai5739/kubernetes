@@ -147,6 +147,21 @@ func CreateOrUpdateDeployment(client clientset.Interface, deploy *apps.Deploymen
 	return nil
 }
 
+// CreateOrRetainDeployment creates a Deployment if the target resource doesn't exist. If the resource exists already, this function will retain the resource instead.
+func CreateOrRetainDeployment(client clientset.Interface, deploy *apps.Deployment, deployName string) error {
+	if _, err := client.AppsV1().Deployments(deploy.ObjectMeta.Namespace).Get(deployName, metav1.GetOptions{}); err != nil {
+		if !apierrors.IsNotFound(err) {
+			return nil
+		}
+		if _, err := client.AppsV1().Deployments(deploy.ObjectMeta.Namespace).Create(deploy); err != nil {
+			if !apierrors.IsAlreadyExists(err) {
+				return errors.Wrap(err, "unable to create deployment")
+			}
+		}
+	}
+	return nil
+}
+
 // CreateOrUpdateDaemonSet creates a DaemonSet if the target resource doesn't exist. If the resource exists already, this function will update the resource instead.
 func CreateOrUpdateDaemonSet(client clientset.Interface, ds *apps.DaemonSet) error {
 	if _, err := client.AppsV1().DaemonSets(ds.ObjectMeta.Namespace).Create(ds); err != nil {
@@ -292,4 +307,26 @@ func PatchNode(client clientset.Interface, nodeName string, patchFn func(*v1.Nod
 	// the function returns false. If the condition function returns an error
 	// then the retries end and the error is returned.
 	return wait.Poll(constants.APICallRetryInterval, constants.PatchNodeTimeout, PatchNodeOnce(client, nodeName, patchFn))
+}
+
+// GetConfigMapWithRetry tries to retrieve a ConfigMap using the given client,
+// retrying if we get an unexpected error.
+//
+// TODO: evaluate if this can be done better. Potentially remove the retry if feasible.
+func GetConfigMapWithRetry(client clientset.Interface, namespace, name string) (*v1.ConfigMap, error) {
+	var cm *v1.ConfigMap
+	var lastError error
+	err := wait.ExponentialBackoff(clientsetretry.DefaultBackoff, func() (bool, error) {
+		var err error
+		cm, err = client.CoreV1().ConfigMaps(namespace).Get(name, metav1.GetOptions{})
+		if err == nil {
+			return true, nil
+		}
+		lastError = err
+		return false, nil
+	})
+	if err == nil {
+		return cm, nil
+	}
+	return nil, lastError
 }
